@@ -9,9 +9,11 @@ import { resolveUserPath } from "../utils.js";
 
 export type ResolvedWhatsAppAccount = {
   accountId: string;
+  name?: string;
   enabled: boolean;
   authDir: string;
   isLegacyAuthDir: boolean;
+  selfChatMode?: boolean;
   allowFrom?: string[];
   groupAllowFrom?: string[];
   groupPolicy?: GroupPolicy;
@@ -100,9 +102,11 @@ export function resolveWhatsAppAccount(params: {
   });
   return {
     accountId,
+    name: accountCfg?.name?.trim() || undefined,
     enabled,
     authDir,
     isLegacyAuthDir: isLegacy,
+    selfChatMode: accountCfg?.selfChatMode ?? params.cfg.whatsapp?.selfChatMode,
     allowFrom: accountCfg?.allowFrom ?? params.cfg.whatsapp?.allowFrom,
     groupAllowFrom:
       accountCfg?.groupAllowFrom ?? params.cfg.whatsapp?.groupAllowFrom,

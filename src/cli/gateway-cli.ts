@@ -20,8 +20,17 @@ import {
 } from "../gateway/ws-logging.js";
 import { setVerbose } from "../globals.js";
 import { GatewayLockError } from "../infra/gateway-lock.js";
+import { formatPortDiagnostics, inspectPortUsage } from "../infra/ports.js";
 import { createSubsystemLogger } from "../logging.js";
 import { defaultRuntime } from "../runtime.js";
+import {
+  runDaemonInstall,
+  runDaemonRestart,
+  runDaemonStart,
+  runDaemonStatus,
+  runDaemonStop,
+  runDaemonUninstall,
+} from "./daemon-cli.js";
 import { createDefaultDeps } from "./deps.js";
 import { forceFreePortAndWait } from "./ports.js";
 
@@ -88,21 +97,6 @@ function renderGatewayServiceStopHints(): string[] {
       ];
     default:
       return ["Tip: clawdbot gateway stop"];
-  }
-}
-
-function renderGatewayServiceStartHints(): string[] {
-  switch (process.platform) {
-    case "darwin":
-      return [
-        `launchctl bootstrap gui/$UID ~/Library/LaunchAgents/${GATEWAY_LAUNCH_AGENT_LABEL}.plist`,
-      ];
-    case "linux":
-      return [`systemctl --user start ${GATEWAY_SYSTEMD_SERVICE_NAME}.service`];
-    case "win32":
-      return [`schtasks /Run /TN "${GATEWAY_WINDOWS_TASK_NAME}"`];
-    default:
-      return [];
   }
 }
 
@@ -375,6 +369,16 @@ export function registerGatewayCli(program: Command) {
           defaultRuntime.error(
             `Gateway failed to start: ${errMessage}\nIf the gateway is supervised, stop it with: clawdbot gateway stop`,
           );
+          try {
+            const diagnostics = await inspectPortUsage(port);
+            if (diagnostics.status === "busy") {
+              for (const line of formatPortDiagnostics(diagnostics)) {
+                defaultRuntime.error(line);
+              }
+            }
+          } catch {
+            // ignore diagnostics failures
+          }
           await maybeExplainGatewayServiceStop();
           defaultRuntime.exit(1);
           return;
@@ -585,6 +589,16 @@ export function registerGatewayCli(program: Command) {
           defaultRuntime.error(
             `Gateway failed to start: ${errMessage}\nIf the gateway is supervised, stop it with: clawdbot gateway stop`,
           );
+          try {
+            const diagnostics = await inspectPortUsage(port);
+            if (diagnostics.status === "busy") {
+              for (const line of formatPortDiagnostics(diagnostics)) {
+                defaultRuntime.error(line);
+              }
+            }
+          } catch {
+            // ignore diagnostics failures
+          }
           await maybeExplainGatewayServiceStop();
           defaultRuntime.exit(1);
           return;
@@ -592,6 +606,62 @@ export function registerGatewayCli(program: Command) {
         defaultRuntime.error(`Gateway failed to start: ${String(err)}`);
         defaultRuntime.exit(1);
       }
+    });
+
+  gateway
+    .command("install")
+    .description(
+      "Install the Gateway service (alias for `clawdbot daemon install`)",
+    )
+    .option("--port <port>", "Gateway port")
+    .option("--runtime <runtime>", "Daemon runtime (node|bun). Default: node")
+    .option("--token <token>", "Gateway token (token auth)")
+    .action(async (opts) => {
+      await runDaemonInstall(opts);
+    });
+
+  gateway
+    .command("uninstall")
+    .description(
+      "Uninstall the Gateway service (alias for `clawdbot daemon uninstall`)",
+    )
+    .action(async () => {
+      await runDaemonUninstall();
+    });
+
+  gateway
+    .command("start")
+    .description(
+      "Start the Gateway service (alias for `clawdbot daemon start`)",
+    )
+    .action(async () => {
+      await runDaemonStart();
+    });
+
+  const gatewayDaemon = gateway
+    .command("daemon")
+    .description("Daemon helpers (alias for `clawdbot daemon`)");
+
+  gatewayDaemon
+    .command("status")
+    .description("Show daemon install status + probe the Gateway")
+    .option(
+      "--url <url>",
+      "Gateway WebSocket URL (defaults to config/remote/local)",
+    )
+    .option("--token <token>", "Gateway token (if required)")
+    .option("--password <password>", "Gateway password (password auth)")
+    .option("--timeout <ms>", "Timeout in ms", "10000")
+    .option("--no-probe", "Skip RPC probe")
+    .option("--deep", "Scan system-level services", false)
+    .option("--json", "Output JSON", false)
+    .action(async (opts) => {
+      await runDaemonStatus({
+        rpc: opts,
+        probe: Boolean(opts.probe),
+        deep: Boolean(opts.deep),
+        json: Boolean(opts.json),
+      });
     });
 
   gatewayCallOpts(
@@ -737,53 +807,14 @@ export function registerGatewayCli(program: Command) {
     .command("stop")
     .description("Stop the Gateway service (launchd/systemd/schtasks)")
     .action(async () => {
-      const service = resolveGatewayService();
-      let loaded = false;
-      try {
-        loaded = await service.isLoaded({ env: process.env });
-      } catch (err) {
-        defaultRuntime.error(`Gateway service check failed: ${String(err)}`);
-        defaultRuntime.exit(1);
-        return;
-      }
-      if (!loaded) {
-        defaultRuntime.log(`Gateway service ${service.notLoadedText}.`);
-        return;
-      }
-      try {
-        await service.stop({ stdout: process.stdout });
-      } catch (err) {
-        defaultRuntime.error(`Gateway stop failed: ${String(err)}`);
-        defaultRuntime.exit(1);
-      }
+      await runDaemonStop();
     });
 
   gateway
     .command("restart")
     .description("Restart the Gateway service (launchd/systemd/schtasks)")
     .action(async () => {
-      const service = resolveGatewayService();
-      let loaded = false;
-      try {
-        loaded = await service.isLoaded({ env: process.env });
-      } catch (err) {
-        defaultRuntime.error(`Gateway service check failed: ${String(err)}`);
-        defaultRuntime.exit(1);
-        return;
-      }
-      if (!loaded) {
-        defaultRuntime.log(`Gateway service ${service.notLoadedText}.`);
-        for (const hint of renderGatewayServiceStartHints()) {
-          defaultRuntime.log(`Start with: ${hint}`);
-        }
-        return;
-      }
-      try {
-        await service.restart({ stdout: process.stdout });
-      } catch (err) {
-        defaultRuntime.error(`Gateway restart failed: ${String(err)}`);
-        defaultRuntime.exit(1);
-      }
+      await runDaemonRestart();
     });
 
   // Build default deps (keeps parity with other commands; future-proofing).

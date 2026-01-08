@@ -1,6 +1,11 @@
 import chalk from "chalk";
 import { Command } from "commander";
 import { agentCliCommand } from "../commands/agent-via-gateway.js";
+import {
+  agentsAddCommand,
+  agentsDeleteCommand,
+  agentsListCommand,
+} from "../commands/agents.js";
 import { configureCommand } from "../commands/configure.js";
 import { doctorCommand } from "../commands/doctor.js";
 import { healthCommand } from "../commands/health.js";
@@ -19,7 +24,7 @@ import {
   writeConfigFile,
 } from "../config/config.js";
 import { danger, setVerbose } from "../globals.js";
-import { autoMigrateLegacyAgentDir } from "../infra/state-migrations.js";
+import { autoMigrateLegacyState } from "../infra/state-migrations.js";
 import { loginWeb, logoutWeb } from "../provider-web.js";
 import { defaultRuntime } from "../runtime.js";
 import { VERSION } from "../version.js";
@@ -27,6 +32,7 @@ import { resolveWhatsAppAccount } from "../web/accounts.js";
 import { registerBrowserCli } from "./browser-cli.js";
 import { registerCanvasCli } from "./canvas-cli.js";
 import { registerCronCli } from "./cron-cli.js";
+import { registerDaemonCli } from "./daemon-cli.js";
 import { createDefaultDeps } from "./deps.js";
 import { registerDnsCli } from "./dns-cli.js";
 import { registerDocsCli } from "./docs-cli.js";
@@ -36,6 +42,7 @@ import { registerModelsCli } from "./models-cli.js";
 import { registerNodesCli } from "./nodes-cli.js";
 import { registerPairingCli } from "./pairing-cli.js";
 import { forceFreePort } from "./ports.js";
+import { registerProvidersCli } from "./providers-cli.js";
 import { registerTelegramCli } from "./telegram-cli.js";
 import { registerTuiCli } from "./tui-cli.js";
 
@@ -132,7 +139,7 @@ export function buildProgram() {
   program.hook("preAction", async (_thisCommand, actionCommand) => {
     if (actionCommand.name() === "doctor") return;
     const cfg = loadConfig();
-    await autoMigrateLegacyAgentDir({ cfg });
+    await autoMigrateLegacyState({ cfg });
   });
   const examples = [
     [
@@ -217,7 +224,10 @@ export function buildProgram() {
     .option("--workspace <dir>", "Agent workspace directory (default: ~/clawd)")
     .option("--non-interactive", "Run without prompts", false)
     .option("--mode <mode>", "Wizard mode: local|remote")
-    .option("--auth-choice <choice>", "Auth: oauth|apiKey|minimax|skip")
+    .option(
+      "--auth-choice <choice>",
+      "Auth: oauth|openai-codex|antigravity|apiKey|minimax|skip",
+    )
     .option("--anthropic-api-key <key>", "Anthropic API key")
     .option("--gateway-port <port>", "Gateway port")
     .option("--gateway-bind <mode>", "Gateway bind: loopback|lan|tailnet|auto")
@@ -243,6 +253,8 @@ export function buildProgram() {
             mode: opts.mode as "local" | "remote" | undefined,
             authChoice: opts.authChoice as
               | "oauth"
+              | "openai-codex"
+              | "antigravity"
               | "apiKey"
               | "minimax"
               | "skip"
@@ -307,10 +319,20 @@ export function buildProgram() {
       "Disable workspace memory system suggestions",
       false,
     )
+    .option("--yes", "Accept defaults without prompting", false)
+    .option(
+      "--non-interactive",
+      "Run without prompts (safe migrations only)",
+      false,
+    )
+    .option("--deep", "Scan system services for extra gateway installs", false)
     .action(async (opts) => {
       try {
         await doctorCommand(defaultRuntime, {
           workspaceSuggestions: opts.workspaceSuggestions,
+          yes: Boolean(opts.yes),
+          nonInteractive: Boolean(opts.nonInteractive),
+          deep: Boolean(opts.deep),
         });
       } catch (err) {
         defaultRuntime.error(String(err));
@@ -537,7 +559,76 @@ Examples:
       }
     });
 
+  const agents = program
+    .command("agents")
+    .description("Manage isolated agents (workspaces + auth + routing)");
+
+  agents
+    .command("list")
+    .description("List configured agents")
+    .option("--json", "Output JSON instead of text", false)
+    .action(async (opts) => {
+      try {
+        await agentsListCommand({ json: Boolean(opts.json) }, defaultRuntime);
+      } catch (err) {
+        defaultRuntime.error(String(err));
+        defaultRuntime.exit(1);
+      }
+    });
+
+  agents
+    .command("add [name]")
+    .description("Add a new isolated agent")
+    .option("--workspace <dir>", "Workspace directory for the new agent")
+    .option("--json", "Output JSON summary", false)
+    .action(async (name, opts) => {
+      try {
+        await agentsAddCommand(
+          {
+            name: typeof name === "string" ? name : undefined,
+            workspace: opts.workspace as string | undefined,
+            json: Boolean(opts.json),
+          },
+          defaultRuntime,
+        );
+      } catch (err) {
+        defaultRuntime.error(String(err));
+        defaultRuntime.exit(1);
+      }
+    });
+
+  agents
+    .command("delete <id>")
+    .description("Delete an agent and prune workspace/state")
+    .option("--force", "Skip confirmation", false)
+    .option("--json", "Output JSON summary", false)
+    .action(async (id, opts) => {
+      try {
+        await agentsDeleteCommand(
+          {
+            id: String(id),
+            force: Boolean(opts.force),
+            json: Boolean(opts.json),
+          },
+          defaultRuntime,
+        );
+      } catch (err) {
+        defaultRuntime.error(String(err));
+        defaultRuntime.exit(1);
+      }
+    });
+
+  agents.action(async () => {
+    try {
+      await agentsListCommand({}, defaultRuntime);
+    } catch (err) {
+      defaultRuntime.error(String(err));
+      defaultRuntime.exit(1);
+    }
+  });
+
   registerCanvasCli(program);
+  registerDaemonCli(program);
   registerGatewayCli(program);
   registerModelsCli(program);
   registerNodesCli(program);
@@ -547,12 +638,14 @@ Examples:
   registerDocsCli(program);
   registerHooksCli(program);
   registerPairingCli(program);
+  registerProvidersCli(program);
   registerTelegramCli(program);
 
   program
     .command("status")
     .description("Show web session health and recent session recipients")
     .option("--json", "Output JSON instead of text", false)
+    .option("--usage", "Show provider usage/quota snapshots", false)
     .option(
       "--deep",
       "Probe providers (WhatsApp Web + Telegram + Discord + Slack + Signal)",
@@ -560,17 +653,21 @@ Examples:
     )
     .option("--timeout <ms>", "Probe timeout in milliseconds", "10000")
     .option("--verbose", "Verbose logging", false)
+    .option("--debug", "Alias for --verbose", false)
     .addHelpText(
       "after",
       `
 Examples:
   clawdbot status                   # show linked account + session store summary
   clawdbot status --json            # machine-readable output
+  clawdbot status --usage           # show provider usage/quota snapshots
   clawdbot status --deep            # run provider probes (WA + Telegram + Discord + Slack + Signal)
-  clawdbot status --deep --timeout 5000 # tighten probe timeout`,
+  clawdbot status --deep --timeout 5000 # tighten probe timeout
+  clawdbot providers status         # gateway provider runtime + probes`,
     )
     .action(async (opts) => {
-      setVerbose(Boolean(opts.verbose));
+      const verbose = Boolean(opts.verbose || opts.debug);
+      setVerbose(verbose);
       const timeout = opts.timeout
         ? Number.parseInt(String(opts.timeout), 10)
         : undefined;
@@ -586,7 +683,9 @@ Examples:
           {
             json: Boolean(opts.json),
             deep: Boolean(opts.deep),
+            usage: Boolean(opts.usage),
             timeoutMs: timeout,
+            verbose,
           },
           defaultRuntime,
         );
@@ -602,8 +701,10 @@ Examples:
     .option("--json", "Output JSON instead of text", false)
     .option("--timeout <ms>", "Connection timeout in milliseconds", "10000")
     .option("--verbose", "Verbose logging", false)
+    .option("--debug", "Alias for --verbose", false)
     .action(async (opts) => {
-      setVerbose(Boolean(opts.verbose));
+      const verbose = Boolean(opts.verbose || opts.debug);
+      setVerbose(verbose);
       const timeout = opts.timeout
         ? Number.parseInt(String(opts.timeout), 10)
         : undefined;
@@ -619,6 +720,7 @@ Examples:
           {
             json: Boolean(opts.json),
             timeoutMs: timeout,
+            verbose,
           },
           defaultRuntime,
         );

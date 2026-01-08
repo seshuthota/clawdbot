@@ -1,14 +1,17 @@
 import type { ThinkLevel } from "../auto-reply/thinking.js";
+import type { EmbeddedContextFile } from "./pi-embedded-helpers.js";
 
-export function buildAgentSystemPromptAppend(params: {
+export function buildAgentSystemPrompt(params: {
   workspaceDir: string;
   defaultThinkLevel?: ThinkLevel;
   extraSystemPrompt?: string;
   ownerNumbers?: string[];
   reasoningTagHint?: boolean;
   toolNames?: string[];
+  modelAliasLines?: string[];
   userTimezone?: string;
   userTime?: string;
+  contextFiles?: EmbeddedContextFile[];
   heartbeatPrompt?: string;
   runtimeInfo?: {
     host?: string;
@@ -20,6 +23,8 @@ export function buildAgentSystemPromptAppend(params: {
   sandboxInfo?: {
     enabled: boolean;
     workspaceDir?: string;
+    workspaceAccess?: "none" | "ro" | "rw";
+    agentWorkspaceMount?: string;
     browserControlUrl?: string;
     browserNoVncUrl?: string;
   };
@@ -34,14 +39,16 @@ export function buildAgentSystemPromptAppend(params: {
     bash: "Run shell commands",
     process: "Manage background bash sessions",
     whatsapp_login: "Generate and wait for WhatsApp QR login",
-    browser: "Control the dedicated clawd browser",
+    browser: "Control web browser",
     canvas: "Present/eval/snapshot the Canvas",
     nodes: "List/describe/notify/camera/screen on paired nodes",
     cron: "Manage cron jobs and wake events",
-    gateway: "Restart the running Gateway process",
-    sessions_list: "List sessions with filters and last messages",
-    sessions_history: "Fetch message history for a session",
-    sessions_send: "Send a message into another session",
+    gateway:
+      "Restart, apply config, or run updates on the running ClaudeBot process",
+    sessions_list: "List other sessions (incl. sub-agents) with filters/last",
+    sessions_history: "Fetch history for another session/sub-agent",
+    sessions_send: "Send a message to another session/sub-agent",
+    sessions_spawn: "Spawn a sub-agent session",
     image: "Analyze an image with the configured image model",
     discord: "Send Discord reactions/messages and manage threads",
     slack: "Send Slack messages and manage channels",
@@ -82,7 +89,6 @@ export function buildAgentSystemPromptAppend(params: {
     new Set(normalizedTools.filter((tool) => !toolOrder.includes(tool))),
   );
   const enabledTools = toolOrder.filter((tool) => availableTools.has(tool));
-  const disabledTools = toolOrder.filter((tool) => !availableTools.has(tool));
   const toolLines = enabledTools.map((tool) => {
     const summary = toolSummaries[tool];
     return summary ? `- ${tool}: ${summary}` : `- ${tool}`;
@@ -91,11 +97,7 @@ export function buildAgentSystemPromptAppend(params: {
     toolLines.push(`- ${tool}`);
   }
 
-  const thinkHint =
-    params.defaultThinkLevel && params.defaultThinkLevel !== "off"
-      ? `Default thinking level: ${params.defaultThinkLevel}.`
-      : "Default thinking level: off.";
-
+  const hasGateway = availableTools.has("gateway");
   const extraSystemPrompt = params.extraSystemPrompt?.trim();
   const ownerNumbers = (params.ownerNumbers ?? [])
     .map((value) => value.trim())
@@ -123,19 +125,9 @@ export function buildAgentSystemPromptAppend(params: {
     ? `Heartbeat prompt: ${heartbeatPrompt}`
     : "Heartbeat prompt: (configured)";
   const runtimeInfo = params.runtimeInfo;
-  const runtimeLines: string[] = [];
-  if (runtimeInfo?.host) runtimeLines.push(`Host: ${runtimeInfo.host}`);
-  if (runtimeInfo?.os) {
-    const archSuffix = runtimeInfo.arch ? ` (${runtimeInfo.arch})` : "";
-    runtimeLines.push(`OS: ${runtimeInfo.os}${archSuffix}`);
-  } else if (runtimeInfo?.arch) {
-    runtimeLines.push(`Arch: ${runtimeInfo.arch}`);
-  }
-  if (runtimeInfo?.node) runtimeLines.push(`Node: ${runtimeInfo.node}`);
-  if (runtimeInfo?.model) runtimeLines.push(`Model: ${runtimeInfo.model}`);
 
   const lines = [
-    "You are Clawd, a personal assistant running inside Clawdbot.",
+    "You are a personal assistant running inside ClaudeBot.",
     "",
     "## Tooling",
     "Tool availability (filtered by policy):",
@@ -157,11 +149,32 @@ export function buildAgentSystemPromptAppend(params: {
           "- sessions_history: fetch session history",
           "- sessions_send: send to another session",
         ].join("\n"),
-    disabledTools.length > 0
-      ? `Unavailable tools (do not call): ${disabledTools.join(", ")}`
-      : "",
     "TOOLS.md does not control tool availability; it is user guidance for how to use external tools.",
+    "If a task is more complex or takes longer, spawn a sub-agent. It will do the work for you and ping you when it's done. You can always check up on it.",
     "",
+    "## Skills",
+    `Skills provide task-specific instructions. Use \`read\` to load from ${params.workspaceDir}/skills/<name>/SKILL.md when needed.`,
+    "",
+    hasGateway ? "## ClaudeBot Self-Update" : "",
+    hasGateway
+      ? [
+          "Use the ClaudeBot self-update tool to update or reconfigure this instance when asked.",
+          "Actions: config.get, config.schema, config.apply (validate + write full config, then restart), update.run (update deps or git, then restart).",
+          "After restart, ClaudeBot pings the last active session automatically.",
+        ].join("\n")
+      : "",
+    hasGateway ? "" : "",
+    "",
+    params.modelAliasLines && params.modelAliasLines.length > 0
+      ? "## Model Aliases"
+      : "",
+    params.modelAliasLines && params.modelAliasLines.length > 0
+      ? "Prefer aliases when specifying model overrides; full provider/model is also accepted."
+      : "",
+    params.modelAliasLines && params.modelAliasLines.length > 0
+      ? params.modelAliasLines.join("\n")
+      : "",
+    params.modelAliasLines && params.modelAliasLines.length > 0 ? "" : "",
     "## Workspace",
     `Your working directory is: ${params.workspaceDir}`,
     "Treat this directory as the single global workspace for file operations unless explicitly instructed otherwise.",
@@ -173,6 +186,13 @@ export function buildAgentSystemPromptAppend(params: {
           "Some tools may be unavailable due to sandbox policy.",
           params.sandboxInfo.workspaceDir
             ? `Sandbox workspace: ${params.sandboxInfo.workspaceDir}`
+            : "",
+          params.sandboxInfo.workspaceAccess
+            ? `Agent workspace access: ${params.sandboxInfo.workspaceAccess}${
+                params.sandboxInfo.agentWorkspaceMount
+                  ? ` (mounted at ${params.sandboxInfo.agentWorkspaceMount})`
+                  : ""
+              }`
             : "",
           params.sandboxInfo.browserControlUrl
             ? `Sandbox browser control URL: ${params.sandboxInfo.browserControlUrl}`
@@ -189,15 +209,11 @@ export function buildAgentSystemPromptAppend(params: {
     ownerLine ?? "",
     ownerLine ? "" : "",
     "## Workspace Files (injected)",
-    "These user-editable files are loaded by Clawdbot and included below in Project Context.",
+    "These user-editable files are loaded by ClaudeBot and included below in Project Context.",
     "",
-    "## Messaging Safety",
-    "Never send streaming/partial replies to external messaging surfaces; only final replies should be delivered there.",
-    "Clawdbot handles message transport automatically; respond normally and your reply will be delivered to the current chat.",
-    "",
-    userTimezone || userTime ? "## Time" : "",
-    userTimezone ? `User timezone: ${userTimezone}` : "",
-    userTime ? `Current user time: ${userTime}` : "",
+    userTimezone || userTime
+      ? `Time: assume UTC unless stated. User TZ=${userTimezone ?? "unknown"}. Current user time (converted)=${userTime ?? "unknown"}.`
+      : "",
     userTimezone || userTime ? "" : "",
     "## Reply Tags",
     "To request a native reply/quote on supported surfaces, include one tag in your reply:",
@@ -214,17 +230,41 @@ export function buildAgentSystemPromptAppend(params: {
     lines.push("## Reasoning Format", reasoningHint, "");
   }
 
+  const contextFiles = params.contextFiles ?? [];
+  if (contextFiles.length > 0) {
+    lines.push(
+      "# Project Context",
+      "",
+      "The following project context files have been loaded:",
+      "",
+    );
+    for (const file of contextFiles) {
+      lines.push(`## ${file.path}`, "", file.content, "");
+    }
+  }
+
   lines.push(
     "## Heartbeats",
     heartbeatPromptLine,
     "If you receive a heartbeat poll (a user message matching the heartbeat prompt above), and there is nothing that needs attention, reply exactly:",
     "HEARTBEAT_OK",
-    'Clawdbot treats a leading/trailing "HEARTBEAT_OK" as a heartbeat ack (and may discard it).',
+    'ClaudeBot treats a leading/trailing "HEARTBEAT_OK" as a heartbeat ack (and may discard it).',
     'If something needs attention, do NOT include "HEARTBEAT_OK"; reply with the alert text instead.',
     "",
     "## Runtime",
-    ...runtimeLines,
-    thinkHint,
+    `Runtime: ${[
+      runtimeInfo?.host ? `host=${runtimeInfo.host}` : "",
+      runtimeInfo?.os
+        ? `os=${runtimeInfo.os}${runtimeInfo?.arch ? ` (${runtimeInfo.arch})` : ""}`
+        : runtimeInfo?.arch
+          ? `arch=${runtimeInfo.arch}`
+          : "",
+      runtimeInfo?.node ? `node=${runtimeInfo.node}` : "",
+      runtimeInfo?.model ? `model=${runtimeInfo.model}` : "",
+      `thinking=${params.defaultThinkLevel ?? "off"}`,
+    ]
+      .filter(Boolean)
+      .join(" | ")}`,
   );
 
   return lines.filter(Boolean).join("\n");

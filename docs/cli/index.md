@@ -27,9 +27,18 @@ clawdbot [--dev] [--profile <name>] <command>
   doctor
   login
   logout
+  providers
+    list
+    status
+    add
+    remove
   send
   poll
   agent
+  agents
+    list
+    add
+    delete
   status
   health
   sessions
@@ -147,7 +156,7 @@ Options:
 - `--workspace <dir>`
 - `--non-interactive`
 - `--mode <local|remote>`
-- `--auth-choice <oauth|apiKey|minimax|skip>`
+- `--auth-choice <oauth|openai-codex|antigravity|apiKey|minimax|skip>`
 - `--anthropic-api-key <key>`
 - `--gateway-port <port>`
 - `--gateway-bind <loopback|lan|tailnet|auto>`
@@ -172,10 +181,13 @@ Interactive configuration wizard (models, providers, skills, gateway).
 Audit and modernize the local configuration.
 
 ### `doctor`
-Health checks + quick fixes.
+Health checks + quick fixes (config + gateway + legacy services).
 
 Options:
 - `--no-workspace-suggestions`: disable workspace memory hints.
+- `--yes`: accept defaults without prompting (headless).
+- `--non-interactive`: skip prompts; apply safe migrations only.
+- `--deep`: scan system services for extra gateway installs.
 
 ## Auth + provider helpers
 
@@ -193,6 +205,33 @@ Clear cached WhatsApp Web credentials.
 Options:
 - `--provider <provider>`
 - `--account <id>`
+
+### `providers`
+Manage chat provider accounts (WhatsApp/Telegram/Discord/Slack/Signal/iMessage).
+
+Subcommands:
+- `providers list`: show configured chat providers and auth profiles (Claude CLI + Codex CLI sync included).
+- `providers status`: check gateway reachability and provider health (`--probe` to verify credentials; use `status --deep` for local-only probes).
+- `providers add`: wizard-style setup when no flags are passed; flags switch to non-interactive mode.
+- `providers remove`: disable by default; pass `--delete` to remove config entries without prompts.
+
+Common options:
+- `--provider <name>`: `whatsapp|telegram|discord|slack|signal|imessage`
+- `--account <id>`: provider account id (default `default`)
+- `--name <label>`: display name for the account
+
+`providers list` options:
+- `--no-usage`: skip provider usage/quota snapshots (OAuth/API-backed only).
+- `--json`: output JSON (includes usage unless `--no-usage` is set).
+
+Examples:
+```bash
+clawdbot providers add --provider telegram --account alerts --name "Alerts Bot" --token $TELEGRAM_BOT_TOKEN
+clawdbot providers add --provider discord --account work --name "Work Bot" --token $DISCORD_BOT_TOKEN
+clawdbot providers remove --provider discord --account work --delete
+clawdbot providers status --probe
+clawdbot status --deep
+```
 
 ### `pairing`
 Approve DM pairing requests across providers.
@@ -272,14 +311,52 @@ Options:
 - `--json`
 - `--timeout <seconds>`
 
+### `agents`
+Manage isolated agents (workspaces + auth + routing).
+
+#### `agents list`
+List configured agents.
+
+Options:
+- `--json`
+
+#### `agents add [name]`
+Add a new isolated agent. If `--workspace` is omitted, runs the guided wizard.
+
+Options:
+- `--workspace <dir>`
+- `--json`
+
+#### `agents delete <id>`
+Delete an agent and prune its workspace + state.
+
+Options:
+- `--force`
+- `--json`
+
 ### `status`
 Show linked session health and recent recipients.
 
 Options:
 - `--json`
 - `--deep` (probe providers)
+- `--usage` (show provider usage/quota)
 - `--timeout <ms>`
 - `--verbose`
+
+### Usage tracking
+Clawdbot can surface provider usage/quota when OAuth/API creds are available.
+
+Surfaces:
+- `/status` (adds a short usage line when available)
+- `clawdbot status --usage` (prints full provider breakdown)
+- macOS menu bar (Usage section under Context)
+
+Notes:
+- Data comes directly from provider usage endpoints (no estimates).
+- Providers: Anthropic, GitHub Copilot, Gemini CLI, Antigravity, OpenAI Codex OAuth, plus z.ai when an API key is configured.
+- If no matching credentials exist, usage is hidden.
+- Details: see [Usage tracking](/concepts/usage-tracking).
 
 ### `health`
 Fetch health from the running Gateway.
@@ -320,6 +397,25 @@ Options:
 ### `gateway-daemon`
 Run the Gateway as a long-lived daemon (same options as `gateway`, minus `--allow-unconfigured` and `--force`).
 
+### `daemon`
+Manage the Gateway service (launchd/systemd/schtasks).
+
+Subcommands:
+- `daemon status` (probes the Gateway RPC by default)
+- `daemon install` (service install)
+- `daemon uninstall`
+- `daemon start`
+- `daemon stop`
+- `daemon restart`
+
+Notes:
+- `daemon status` uses the same URL/token defaults as `gateway status` unless you pass `--url/--token/--password`.
+- `daemon status` supports `--no-probe`, `--deep`, and `--json` for scripting.
+- `daemon status` also surfaces legacy or extra gateway services when it can detect them (`--deep` adds system-level scans).
+- `daemon install` defaults to Node runtime; use `--runtime bun` only when WhatsApp is disabled.
+- `daemon install` options: `--port`, `--runtime`, `--token`.
+- `gateway install|uninstall|start|stop|restart` remain as service aliases; `daemon` is the dedicated manager.
+
 ### `gateway <subcommand>`
 Gateway RPC helpers (use `--url`, `--token`, `--password`, `--timeout`, `--expect-final` for each).
 
@@ -330,8 +426,16 @@ Subcommands:
 - `gateway wake --text <text> [--mode now|next-heartbeat]`
 - `gateway send --to <jidOrPhone> --message <text> [--media-url <url>] [--gif-playback] [--idempotency-key <key>]`
 - `gateway agent --message <text> [--to <jidOrPhone>] [--session-id <id>] [--thinking <level>] [--deliver] [--timeout-seconds <n>] [--idempotency-key <key>]`
+- `gateway install`
+- `gateway uninstall`
+- `gateway start`
 - `gateway stop`
 - `gateway restart`
+- `gateway daemon status` (alias for `clawdbot daemon status`)
+
+Common RPCs:
+- `config.apply` (validate + write config + restart + wake)
+- `update.run` (run update + restart + wake)
 
 ## Models
 
@@ -411,10 +515,10 @@ Manage scheduled jobs (Gateway RPC). See [/automation/cron-jobs](/automation/cro
 
 Subcommands:
 - `cron status [--json]`
-- `cron list [--all] [--json]`
-- `cron add` (requires `--name` and exactly one of `--at` | `--every` | `--cron`, and exactly one payload of `--system-event` | `--message`)
+- `cron list [--all] [--json]` (table output by default; use `--json` for raw)
+- `cron add` (alias: `create`; requires `--name` and exactly one of `--at` | `--every` | `--cron`, and exactly one payload of `--system-event` | `--message`)
 - `cron edit <id>` (patch fields)
-- `cron rm <id>`
+- `cron rm <id>` (aliases: `remove`, `delete`)
 - `cron enable <id>`
 - `cron disable <id>`
 - `cron runs --id <id> [--limit <n>]`

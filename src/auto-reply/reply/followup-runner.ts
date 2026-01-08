@@ -5,20 +5,32 @@ import { runWithModelFallback } from "../../agents/model-fallback.js";
 import { runEmbeddedPiAgent } from "../../agents/pi-embedded.js";
 import { hasNonzeroUsage } from "../../agents/usage.js";
 import { type SessionEntry, saveSessionStore } from "../../config/sessions.js";
+import type { TypingMode } from "../../config/types.js";
 import { logVerbose } from "../../globals.js";
 import { registerAgentRunContext } from "../../infra/agent-events.js";
 import { defaultRuntime } from "../../runtime.js";
 import { stripHeartbeatToken } from "../heartbeat.js";
+import type { OriginatingChannelType } from "../templating.js";
 import { SILENT_REPLY_TOKEN } from "../tokens.js";
 import type { GetReplyOptions, ReplyPayload } from "../types.js";
 import type { FollowupRun } from "./queue.js";
-import { extractReplyToTag } from "./reply-tags.js";
+import {
+  applyReplyThreading,
+  filterMessagingToolDuplicates,
+} from "./reply-payloads.js";
+import {
+  createReplyToModeFilter,
+  resolveReplyToMode,
+} from "./reply-threading.js";
+import { isRoutableChannel, routeReply } from "./route-reply.js";
 import { incrementCompactionCount } from "./session-updates.js";
 import type { TypingController } from "./typing.js";
+import { createTypingSignaler } from "./typing-mode.js";
 
 export function createFollowupRunner(params: {
   opts?: GetReplyOptions;
   typing: TypingController;
+  typingMode: TypingMode;
   sessionEntry?: SessionEntry;
   sessionStore?: Record<string, SessionEntry>;
   sessionKey?: string;
@@ -29,6 +41,7 @@ export function createFollowupRunner(params: {
   const {
     opts,
     typing,
+    typingMode,
     sessionEntry,
     sessionStore,
     sessionKey,
@@ -36,12 +49,34 @@ export function createFollowupRunner(params: {
     defaultModel,
     agentCfgContextTokens,
   } = params;
+  const typingSignals = createTypingSignaler({
+    typing,
+    mode: typingMode,
+    isHeartbeat: opts?.isHeartbeat === true,
+  });
 
-  const sendFollowupPayloads = async (payloads: ReplyPayload[]) => {
-    if (!opts?.onBlockReply) {
+  /**
+   * Sends followup payloads, routing to the originating channel if set.
+   *
+   * When originatingChannel/originatingTo are set on the queued run,
+   * replies are routed directly to that provider instead of using the
+   * session's current dispatcher. This ensures replies go back to
+   * where the message originated.
+   */
+  const sendFollowupPayloads = async (
+    payloads: ReplyPayload[],
+    queued: FollowupRun,
+  ) => {
+    // Check if we should route to originating channel.
+    const { originatingChannel, originatingTo } = queued;
+    const shouldRouteToOriginating =
+      isRoutableChannel(originatingChannel) && originatingTo;
+
+    if (!shouldRouteToOriginating && !opts?.onBlockReply) {
       logVerbose("followup queue: no onBlockReply handler; dropping payloads");
       return;
     }
+
     for (const payload of payloads) {
       if (!payload?.text && !payload?.mediaUrl && !payload?.mediaUrls?.length) {
         continue;
@@ -53,12 +88,35 @@ export function createFollowupRunner(params: {
       ) {
         continue;
       }
-      await typing.startTypingOnText(payload.text);
-      await opts.onBlockReply(payload);
+      await typingSignals.signalTextDelta(payload.text);
+
+      // Route to originating channel if set, otherwise fall back to dispatcher.
+      if (shouldRouteToOriginating) {
+        const result = await routeReply({
+          payload,
+          channel: originatingChannel,
+          to: originatingTo,
+          accountId: queued.originatingAccountId,
+          threadId: queued.originatingThreadId,
+          cfg: queued.run.config,
+        });
+        if (!result.ok) {
+          // Log error and fall back to dispatcher if available.
+          const errorMsg = result.error ?? "unknown error";
+          logVerbose(`followup queue: route-reply failed: ${errorMsg}`);
+          // Fallback: try the dispatcher if routing failed.
+          if (opts?.onBlockReply) {
+            await opts.onBlockReply(payload);
+          }
+        }
+      } else if (opts?.onBlockReply) {
+        await opts.onBlockReply(payload);
+      }
     }
   };
 
   return async (queued: FollowupRun) => {
+    await typingSignals.signalRunStart();
     try {
       const runId = crypto.randomUUID();
       if (queued.run.sessionKey) {
@@ -91,6 +149,7 @@ export function createFollowupRunner(params: {
               authProfileId: queued.run.authProfileId,
               thinkLevel: queued.run.thinkLevel,
               verboseLevel: queued.run.verboseLevel,
+              reasoningLevel: queued.run.reasoningLevel,
               bashElevated: queued.run.bashElevated,
               timeoutMs: queued.run.timeoutMs,
               runId,
@@ -128,24 +187,26 @@ export function createFollowupRunner(params: {
         if (stripped.shouldSkip && !hasMedia) return [];
         return [{ ...payload, text: stripped.text }];
       });
+      const replyToChannel =
+        queued.originatingChannel ??
+        (queued.run.messageProvider?.toLowerCase() as
+          | OriginatingChannelType
+          | undefined);
+      const applyReplyToMode = createReplyToModeFilter(
+        resolveReplyToMode(queued.run.config, replyToChannel),
+      );
 
-      const replyTaggedPayloads: ReplyPayload[] = sanitizedPayloads
-        .map((payload) => {
-          const { cleaned, replyToId } = extractReplyToTag(payload.text);
-          return {
-            ...payload,
-            text: cleaned ? cleaned : undefined,
-            replyToId: replyToId ?? payload.replyToId,
-          };
-        })
-        .filter(
-          (payload) =>
-            payload.text ||
-            payload.mediaUrl ||
-            (payload.mediaUrls && payload.mediaUrls.length > 0),
-        );
+      const replyTaggedPayloads: ReplyPayload[] = applyReplyThreading({
+        payloads: sanitizedPayloads,
+        applyReplyToMode,
+      });
 
-      if (replyTaggedPayloads.length === 0) return;
+      const dedupedPayloads = filterMessagingToolDuplicates({
+        payloads: replyTaggedPayloads,
+        sentTexts: runResult.messagingToolSentTexts ?? [],
+      });
+
+      if (dedupedPayloads.length === 0) return;
 
       if (autoCompactionCompleted) {
         const count = await incrementCompactionCount({
@@ -210,7 +271,7 @@ export function createFollowupRunner(params: {
         }
       }
 
-      await sendFollowupPayloads(replyTaggedPayloads);
+      await sendFollowupPayloads(dedupedPayloads, queued);
     } finally {
       typing.markRunComplete();
     }

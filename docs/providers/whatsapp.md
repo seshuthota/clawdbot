@@ -5,7 +5,7 @@ read_when:
 ---
 # WhatsApp (web provider)
 
-Updated: 2025-12-23
+Updated: 2026-01-07
 
 Status: WhatsApp Web via Baileys only. Gateway owns the session(s).
 
@@ -35,6 +35,13 @@ WhatsApp requires a real mobile number for verification. VoIP and virtual number
 
 **WhatsApp Business:** You can use WhatsApp Business on the same phone with a different number. This is a great option if you want to keep your personal WhatsApp separate — just install WhatsApp Business and register it with Clawdbot's dedicated number.
 
+## Why Not Twilio?
+- Early Clawdbot builds supported Twilio’s WhatsApp Business integration.
+- WhatsApp Business numbers are a poor fit for a personal assistant.
+- Meta enforces a 24‑hour reply window; if you haven’t responded in the last 24 hours, the business number can’t initiate new messages.
+- High-volume or “chatty” usage triggers aggressive blocking, because business accounts aren’t meant to send dozens of personal assistant messages.
+- Result: unreliable delivery and frequent blocks, so support was removed.
+
 ## Login + credentials
 - Login command: `clawdbot login` (QR via Linked Devices).
 - Multi-account login: `clawdbot login --account <id>` (`<id>` = `accountId`).
@@ -51,9 +58,28 @@ WhatsApp requires a real mobile number for verification. VoIP and virtual number
 - Status/broadcast chats are ignored.
 - Direct chats use E.164; groups use group JID.
 - **DM policy**: `whatsapp.dmPolicy` controls direct chat access (default: `pairing`).
-  - Pairing: unknown senders get a pairing code (approve via `clawdbot pairing approve --provider whatsapp <code>`).
+  - Pairing: unknown senders get a pairing code (approve via `clawdbot pairing approve --provider whatsapp <code>`; codes expire after 1 hour).
   - Open: requires `whatsapp.allowFrom` to include `"*"`.
   - Self messages are always allowed; “self-chat mode” still requires `whatsapp.allowFrom` to include your own number.
+
+### Same-phone mode (personal number)
+If you run Clawdbot on your **personal WhatsApp number**, set:
+
+```json
+{
+  "whatsapp": {
+    "selfChatMode": true
+  }
+}
+```
+
+Behavior:
+- Suppresses pairing replies for **outbound DMs** (prevents spamming contacts).
+- Inbound unknown senders still follow `whatsapp.dmPolicy`.
+
+Recommended for personal numbers:
+- Set `whatsapp.dmPolicy="allowlist"` and add your number to `whatsapp.allowFrom`.
+- Set `messages.responsePrefix` (for example, `[clawdbot]`) so replies are clearly labeled.
 - **Group policy**: `whatsapp.groupPolicy` controls group handling (`open|disabled|allowlist`).
   - `allowlist` uses `whatsapp.groupAllowFrom` (fallback: explicit `whatsapp.allowFrom`).
 - **Self-chat mode**: avoids auto read receipts and ignores mention JIDs.
@@ -97,13 +123,16 @@ WhatsApp requires a real mobile number for verification. VoIP and virtual number
 ## Agent tool (reactions)
 - Tool: `whatsapp` with `react` action (`chatJid`, `messageId`, `emoji`, optional `remove`).
 - Optional: `participant` (group sender), `fromMe` (reacting to your own message), `accountId` (multi-account).
-- `emoji=""` removes the bot's reaction(s) on the message.
-- `remove: true` removes the bot's reaction (same effect as empty emoji).
+- Reaction removal semantics: see [/tools/reactions](/tools/reactions).
 - Tool gating: `whatsapp.actions.reactions` (default: enabled).
+
+## Limits
+- Outbound text is chunked to `whatsapp.textChunkLimit` (default 4000).
+- Media items are capped by `agent.mediaMaxMb` (default 5 MB).
 
 ## Outbound send (text + media)
 - Uses active web listener; error if gateway not running.
-- Text chunking: 4k max per message.
+- Text chunking: 4k max per message (configurable via `whatsapp.textChunkLimit`).
 - Media:
   - Image/video/audio/document supported.
   - Audio sent as PTT; `audio/ogg` => `audio/ogg; codecs=opus`.
@@ -133,6 +162,7 @@ WhatsApp requires a real mobile number for verification. VoIP and virtual number
 
 ## Config quick map
 - `whatsapp.dmPolicy` (DM policy: pairing/allowlist/open/disabled).
+- `whatsapp.selfChatMode` (same-phone setup; suppress pairing replies for outbound DMs).
 - `whatsapp.allowFrom` (DM allowlist).
 - `whatsapp.accounts.<accountId>.*` (per-account settings + optional `authDir`).
 - `whatsapp.groupAllowFrom` (group sender allowlist).

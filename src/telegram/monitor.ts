@@ -1,12 +1,16 @@
+import { type RunOptions, run } from "@grammyjs/runner";
+import type { ClawdbotConfig } from "../config/config.js";
 import { loadConfig } from "../config/config.js";
 import type { RuntimeEnv } from "../runtime.js";
+import { resolveTelegramAccount } from "./accounts.js";
 import { createTelegramBot } from "./bot.js";
 import { makeProxyFetch } from "./proxy.js";
-import { resolveTelegramToken } from "./token.js";
 import { startTelegramWebhook } from "./webhook.js";
 
 export type MonitorTelegramOpts = {
   token?: string;
+  accountId?: string;
+  config?: ClawdbotConfig;
   runtime?: RuntimeEnv;
   abortSignal?: AbortSignal;
   useWebhook?: boolean;
@@ -17,26 +21,47 @@ export type MonitorTelegramOpts = {
   webhookUrl?: string;
 };
 
+export function createTelegramRunnerOptions(
+  cfg: ClawdbotConfig,
+): RunOptions<unknown> {
+  return {
+    sink: {
+      concurrency: cfg.agent?.maxConcurrent ?? 1,
+    },
+    runner: {
+      fetch: {
+        // Match grammY defaults
+        timeout: 30,
+      },
+    },
+  };
+}
+
 export async function monitorTelegramProvider(opts: MonitorTelegramOpts = {}) {
-  const { token } = resolveTelegramToken(loadConfig(), {
-    envToken: opts.token,
+  const cfg = opts.config ?? loadConfig();
+  const account = resolveTelegramAccount({
+    cfg,
+    accountId: opts.accountId,
   });
+  const token = opts.token?.trim() || account.token;
   if (!token) {
     throw new Error(
-      "TELEGRAM_BOT_TOKEN or telegram.botToken/tokenFile is required for Telegram gateway",
+      `Telegram bot token missing for account "${account.accountId}" (set telegram.accounts.${account.accountId}.botToken/tokenFile or TELEGRAM_BOT_TOKEN for default).`,
     );
   }
 
   const proxyFetch =
     opts.proxyFetch ??
-    (loadConfig().telegram?.proxy
-      ? makeProxyFetch(loadConfig().telegram?.proxy as string)
+    (account.config.proxy
+      ? makeProxyFetch(account.config.proxy as string)
       : undefined);
 
   const bot = createTelegramBot({
     token,
     runtime: opts.runtime,
     proxyFetch,
+    config: cfg,
+    accountId: account.accountId,
   });
 
   if (opts.useWebhook) {
@@ -53,13 +78,19 @@ export async function monitorTelegramProvider(opts: MonitorTelegramOpts = {}) {
     return;
   }
 
-  // Long polling
+  // Use grammyjs/runner for concurrent update processing
+  const runner = run(bot, createTelegramRunnerOptions(cfg));
+
   const stopOnAbort = () => {
-    if (opts.abortSignal?.aborted) void bot.stop();
+    if (opts.abortSignal?.aborted) {
+      void runner.stop();
+    }
   };
   opts.abortSignal?.addEventListener("abort", stopOnAbort, { once: true });
+
   try {
-    await bot.start();
+    // runner.task() returns a promise that resolves when the runner stops
+    await runner.task();
   } finally {
     opts.abortSignal?.removeEventListener("abort", stopOnAbort);
   }

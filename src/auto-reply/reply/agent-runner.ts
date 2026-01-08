@@ -14,14 +14,16 @@ import {
   type SessionEntry,
   saveSessionStore,
 } from "../../config/sessions.js";
+import type { TypingMode } from "../../config/types.js";
 import { logVerbose } from "../../globals.js";
 import { registerAgentRunContext } from "../../infra/agent-events.js";
 import { defaultRuntime } from "../../runtime.js";
 import { stripHeartbeatToken } from "../heartbeat.js";
-import type { TemplateContext } from "../templating.js";
+import type { OriginatingChannelType, TemplateContext } from "../templating.js";
 import { normalizeVerboseLevel, type VerboseLevel } from "../thinking.js";
 import { SILENT_REPLY_TOKEN } from "../tokens.js";
 import type { GetReplyOptions, ReplyPayload } from "../types.js";
+import { extractAudioTag } from "./audio-tags.js";
 import { createFollowupRunner } from "./followup-runner.js";
 import {
   enqueueFollowupRun,
@@ -29,9 +31,19 @@ import {
   type QueueSettings,
   scheduleFollowupDrain,
 } from "./queue.js";
-import { extractReplyToTag } from "./reply-tags.js";
+import {
+  applyReplyTagsToPayload,
+  applyReplyThreading,
+  filterMessagingToolDuplicates,
+  isRenderablePayload,
+} from "./reply-payloads.js";
+import {
+  createReplyToModeFilter,
+  resolveReplyToMode,
+} from "./reply-threading.js";
 import { incrementCompactionCount } from "./session-updates.js";
 import type { TypingController } from "./typing.js";
+import { createTypingSignaler } from "./typing-mode.js";
 
 const BUN_FETCH_SOCKET_ERROR_RE = /socket connection was closed unexpectedly/i;
 
@@ -76,6 +88,7 @@ export async function runReplyAgent(params: {
   resolvedBlockStreamingBreak: "text_end" | "message_end";
   sessionCtx: TemplateContext;
   shouldInjectGroupIntro: boolean;
+  typingMode: TypingMode;
 }): Promise<ReplyPayload | ReplyPayload[] | undefined> {
   const {
     commandBody,
@@ -101,9 +114,15 @@ export async function runReplyAgent(params: {
     resolvedBlockStreamingBreak,
     sessionCtx,
     shouldInjectGroupIntro,
+    typingMode,
   } = params;
 
   const isHeartbeat = opts?.isHeartbeat === true;
+  const typingSignals = createTypingSignaler({
+    typing,
+    mode: typingMode,
+    isHeartbeat,
+  });
 
   const shouldEmitToolResult = () => {
     if (!sessionKey || !storePath) {
@@ -138,6 +157,16 @@ export async function runReplyAgent(params: {
       replyToId: payload.replyToId ?? null,
     });
   };
+  const replyToChannel =
+    sessionCtx.OriginatingChannel ??
+    ((sessionCtx.Surface ?? sessionCtx.Provider)?.toLowerCase() as
+      | OriginatingChannelType
+      | undefined);
+  const replyToMode = resolveReplyToMode(
+    followupRun.run.config,
+    replyToChannel,
+  );
+  const applyReplyToMode = createReplyToModeFilter(replyToMode);
 
   if (shouldSteer && isStreaming) {
     const steered = queueEmbeddedPiMessage(
@@ -173,6 +202,7 @@ export async function runReplyAgent(params: {
   const runFollowupTurn = createFollowupRunner({
     opts,
     typing,
+    typingMode,
     sessionEntry,
     sessionStore,
     sessionKey,
@@ -197,6 +227,9 @@ export async function runReplyAgent(params: {
     let fallbackProvider = followupRun.run.provider;
     let fallbackModel = followupRun.run.model;
     try {
+      const allowPartialStream = !(
+        followupRun.run.reasoningLevel === "stream" && opts?.onReasoningStream
+      );
       const fallbackResult = await runWithModelFallback({
         cfg: followupRun.run.config,
         provider: followupRun.run.provider,
@@ -221,41 +254,51 @@ export async function runReplyAgent(params: {
             authProfileId: followupRun.run.authProfileId,
             thinkLevel: followupRun.run.thinkLevel,
             verboseLevel: followupRun.run.verboseLevel,
+            reasoningLevel: followupRun.run.reasoningLevel,
             bashElevated: followupRun.run.bashElevated,
             timeoutMs: followupRun.run.timeoutMs,
             runId,
             blockReplyBreak: resolvedBlockStreamingBreak,
             blockReplyChunking,
-            onPartialReply: opts?.onPartialReply
-              ? async (payload) => {
-                  let text = payload.text;
-                  if (!isHeartbeat && text?.includes("HEARTBEAT_OK")) {
-                    const stripped = stripHeartbeatToken(text, {
-                      mode: "message",
+            onPartialReply:
+              opts?.onPartialReply && allowPartialStream
+                ? async (payload) => {
+                    let text = payload.text;
+                    if (!isHeartbeat && text?.includes("HEARTBEAT_OK")) {
+                      const stripped = stripHeartbeatToken(text, {
+                        mode: "message",
+                      });
+                      if (stripped.didStrip && !didLogHeartbeatStrip) {
+                        didLogHeartbeatStrip = true;
+                        logVerbose(
+                          "Stripped stray HEARTBEAT_OK token from reply",
+                        );
+                      }
+                      if (
+                        stripped.shouldSkip &&
+                        (payload.mediaUrls?.length ?? 0) === 0
+                      ) {
+                        return;
+                      }
+                      text = stripped.text;
+                    }
+                    await typingSignals.signalTextDelta(text);
+                    await opts.onPartialReply?.({
+                      text,
+                      mediaUrls: payload.mediaUrls,
                     });
-                    if (stripped.didStrip && !didLogHeartbeatStrip) {
-                      didLogHeartbeatStrip = true;
-                      logVerbose(
-                        "Stripped stray HEARTBEAT_OK token from reply",
-                      );
-                    }
-                    if (
-                      stripped.shouldSkip &&
-                      (payload.mediaUrls?.length ?? 0) === 0
-                    ) {
-                      return;
-                    }
-                    text = stripped.text;
                   }
-                  if (!isHeartbeat) {
-                    await typing.startTypingOnText(text);
+                : undefined,
+            onReasoningStream:
+              typingSignals.shouldStartOnReasoning || opts?.onReasoningStream
+                ? async (payload) => {
+                    await typingSignals.signalReasoningDelta();
+                    await opts?.onReasoningStream?.({
+                      text: payload.text,
+                      mediaUrls: payload.mediaUrls,
+                    });
                   }
-                  await opts.onPartialReply?.({
-                    text,
-                    mediaUrls: payload.mediaUrls,
-                  });
-                }
-              : undefined,
+                : undefined,
             onAgentEvent: (evt) => {
               if (evt.stream !== "compaction") return;
               const phase =
@@ -283,21 +326,28 @@ export async function runReplyAgent(params: {
                       if (stripped.shouldSkip && !hasMedia) return;
                       text = stripped.text;
                     }
-                    const tagResult = extractReplyToTag(
-                      text,
+                    const taggedPayload = applyReplyTagsToPayload(
+                      {
+                        text,
+                        mediaUrls: payload.mediaUrls,
+                        mediaUrl: payload.mediaUrls?.[0],
+                      },
                       sessionCtx.MessageSid,
                     );
-                    const cleaned = tagResult.cleaned || undefined;
-                    const hasMedia = (payload.mediaUrls?.length ?? 0) > 0;
+                    if (!isRenderablePayload(taggedPayload)) return;
+                    const audioTagResult = extractAudioTag(taggedPayload.text);
+                    const cleaned = audioTagResult.cleaned || undefined;
+                    const hasMedia =
+                      Boolean(taggedPayload.mediaUrl) ||
+                      (taggedPayload.mediaUrls?.length ?? 0) > 0;
                     if (!cleaned && !hasMedia) return;
                     if (cleaned?.trim() === SILENT_REPLY_TOKEN && !hasMedia)
                       return;
-                    const blockPayload: ReplyPayload = {
+                    const blockPayload: ReplyPayload = applyReplyToMode({
+                      ...taggedPayload,
                       text: cleaned,
-                      mediaUrls: payload.mediaUrls,
-                      mediaUrl: payload.mediaUrls?.[0],
-                      replyToId: tagResult.replyToId,
-                    };
+                      audioAsVoice: audioTagResult.audioAsVoice,
+                    });
                     const payloadKey = buildPayloadKey(blockPayload);
                     if (
                       streamedPayloadKeys.has(payloadKey) ||
@@ -307,9 +357,7 @@ export async function runReplyAgent(params: {
                     }
                     pendingStreamedPayloadKeys.add(payloadKey);
                     const task = (async () => {
-                      if (!isHeartbeat) {
-                        await typing.startTypingOnText(cleaned);
-                      }
+                      await typingSignals.signalTextDelta(taggedPayload.text);
                       await opts.onBlockReply?.(blockPayload);
                     })()
                       .then(() => {
@@ -354,9 +402,7 @@ export async function runReplyAgent(params: {
                       }
                       text = stripped.text;
                     }
-                    if (!isHeartbeat) {
-                      await typing.startTypingOnText(text);
-                    }
+                    await typingSignals.signalTextDelta(text);
                     await opts.onToolResult?.({
                       text,
                       mediaUrls: payload.mediaUrls,
@@ -473,34 +519,37 @@ export async function runReplyAgent(params: {
           return [{ ...payload, text: stripped.text }];
         });
 
-    const replyTaggedPayloads: ReplyPayload[] = sanitizedPayloads
+    const replyTaggedPayloads: ReplyPayload[] = applyReplyThreading({
+      payloads: sanitizedPayloads,
+      applyReplyToMode,
+      currentMessageId: sessionCtx.MessageSid,
+    })
       .map((payload) => {
-        const { cleaned, replyToId } = extractReplyToTag(
-          payload.text,
-          sessionCtx.MessageSid,
-        );
+        const audioTagResult = extractAudioTag(payload.text);
         return {
           ...payload,
-          text: cleaned ? cleaned : undefined,
-          replyToId: replyToId ?? payload.replyToId,
+          text: audioTagResult.cleaned ? audioTagResult.cleaned : undefined,
+          audioAsVoice: audioTagResult.audioAsVoice,
         };
       })
-      .filter(
-        (payload) =>
-          payload.text ||
-          payload.mediaUrl ||
-          (payload.mediaUrls && payload.mediaUrls.length > 0),
-      );
+      .filter(isRenderablePayload);
 
+    // Drop final payloads if block streaming is enabled and we already streamed
+    // block replies. Tool-sent duplicates are filtered below.
     const shouldDropFinalPayloads =
       blockStreamingEnabled && didStreamBlockReply;
+    const messagingToolSentTexts = runResult.messagingToolSentTexts ?? [];
+    const dedupedPayloads = filterMessagingToolDuplicates({
+      payloads: replyTaggedPayloads,
+      sentTexts: messagingToolSentTexts,
+    });
     const filteredPayloads = shouldDropFinalPayloads
       ? []
       : blockStreamingEnabled
-        ? replyTaggedPayloads.filter(
+        ? dedupedPayloads.filter(
             (payload) => !streamedPayloadKeys.has(buildPayloadKey(payload)),
           )
-        : replyTaggedPayloads;
+        : dedupedPayloads;
 
     if (filteredPayloads.length === 0) return finalizeWithFollowup(undefined);
 
@@ -511,8 +560,8 @@ export async function runReplyAgent(params: {
       if (payload.mediaUrls && payload.mediaUrls.length > 0) return true;
       return false;
     });
-    if (shouldSignalTyping && !isHeartbeat) {
-      await typing.startTypingLoop();
+    if (shouldSignalTyping) {
+      await typingSignals.signalRunStart();
     }
 
     if (sessionStore && sessionKey) {

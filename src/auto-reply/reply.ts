@@ -25,13 +25,16 @@ import {
   type ClawdbotConfig,
   loadConfig,
 } from "../config/config.js";
-import { resolveSessionTranscriptPath } from "../config/sessions.js";
+import { resolveSessionFilePath } from "../config/sessions.js";
 import { logVerbose } from "../globals.js";
 import { clearCommandLane, getQueueSize } from "../process/command-queue.js";
 import { defaultRuntime } from "../runtime.js";
 import { resolveCommandAuthorization } from "./command-auth.js";
 import { hasControlCommand } from "./command-detection.js";
-import { shouldHandleTextCommands } from "./commands-registry.js";
+import {
+  listChatCommands,
+  shouldHandleTextCommands,
+} from "./commands-registry.js";
 import { getAbortMemory } from "./reply/abort.js";
 import { runReplyAgent } from "./reply/agent-runner.js";
 import { resolveBlockStreamingChunking } from "./reply/block-streaming.js";
@@ -62,10 +65,15 @@ import {
   prependSystemEvents,
 } from "./reply/session-updates.js";
 import { createTypingController } from "./reply/typing.js";
+import {
+  createTypingSignaler,
+  resolveTypingMode,
+} from "./reply/typing-mode.js";
 import type { MsgContext, TemplateContext } from "./templating.js";
 import {
   type ElevatedLevel,
   normalizeThinkLevel,
+  type ReasoningLevel,
   type ThinkLevel,
   type VerboseLevel,
 } from "./thinking.js";
@@ -75,6 +83,7 @@ import type { GetReplyOptions, ReplyPayload } from "./types.js";
 
 export {
   extractElevatedDirective,
+  extractReasoningDirective,
   extractThinkDirective,
   extractVerboseDirective,
 } from "./reply/directives.js";
@@ -197,10 +206,12 @@ export async function getReplyFromConfig(
   configOverride?: ClawdbotConfig,
 ): Promise<ReplyPayload | ReplyPayload[] | undefined> {
   const cfg = configOverride ?? loadConfig();
+  const agentId = resolveAgentIdFromSessionKey(ctx.SessionKey);
   const agentCfg = cfg.agent;
   const sessionCfg = cfg.session;
   const { defaultProvider, defaultModel, aliasIndex } = resolveDefaultModel({
     cfg,
+    agentId,
   });
   let provider = defaultProvider;
   let model = defaultModel;
@@ -208,10 +219,10 @@ export async function getReplyFromConfig(
     const heartbeatRaw = agentCfg?.heartbeat?.model?.trim() ?? "";
     const heartbeatRef = heartbeatRaw
       ? resolveModelRefFromString({
-        raw: heartbeatRaw,
-        defaultProvider,
-        aliasIndex,
-      })
+          raw: heartbeatRaw,
+          defaultProvider,
+          aliasIndex,
+        })
       : null;
     if (heartbeatRef) {
       provider = heartbeatRef.ref.provider;
@@ -219,7 +230,6 @@ export async function getReplyFromConfig(
     }
   }
 
-  const agentId = resolveAgentIdFromSessionKey(ctx.SessionKey);
   const workspaceDirRaw =
     resolveAgentWorkspaceDir(cfg, agentId) ?? DEFAULT_AGENT_WORKSPACE_DIR;
   const workspace = await ensureAgentWorkspace({
@@ -288,6 +298,9 @@ export async function getReplyFromConfig(
     hasVerboseDirective: false,
     verboseLevel: undefined,
     rawVerboseLevel: undefined,
+    hasReasoningDirective: false,
+    reasoningLevel: undefined,
+    rawReasoningLevel: undefined,
     hasElevatedDirective: false,
     elevatedLevel: undefined,
     rawElevatedLevel: undefined,
@@ -306,10 +319,22 @@ export async function getReplyFromConfig(
     rawDrop: undefined,
     hasQueueOptions: false,
   });
-  let parsedDirectives = parseInlineDirectives(rawBody);
+  const reservedCommands = new Set(
+    listChatCommands().flatMap((cmd) =>
+      cmd.textAliases.map((a) => a.replace(/^\//, "").toLowerCase()),
+    ),
+  );
+  const configuredAliases = Object.values(cfg.agent?.models ?? {})
+    .map((entry) => entry.alias?.trim())
+    .filter((alias): alias is string => Boolean(alias))
+    .filter((alias) => !reservedCommands.has(alias.toLowerCase()));
+  let parsedDirectives = parseInlineDirectives(rawBody, {
+    modelAliases: configuredAliases,
+  });
   const hasDirective =
     parsedDirectives.hasThinkDirective ||
     parsedDirectives.hasVerboseDirective ||
+    parsedDirectives.hasReasoningDirective ||
     parsedDirectives.hasElevatedDirective ||
     parsedDirectives.hasStatusDirective ||
     parsedDirectives.hasModelDirective ||
@@ -324,14 +349,15 @@ export async function getReplyFromConfig(
   const directives = commandAuthorized
     ? parsedDirectives
     : {
-      ...parsedDirectives,
-      hasThinkDirective: false,
-      hasVerboseDirective: false,
-      hasStatusDirective: false,
-      hasModelDirective: false,
-      hasQueueDirective: false,
-      queueReset: false,
-    };
+        ...parsedDirectives,
+        hasThinkDirective: false,
+        hasVerboseDirective: false,
+        hasReasoningDirective: false,
+        hasStatusDirective: false,
+        hasModelDirective: false,
+        hasQueueDirective: false,
+        queueReset: false,
+      };
   sessionCtx.Body = parsedDirectives.cleaned;
   sessionCtx.BodyStripped = parsedDirectives.cleaned;
 
@@ -347,12 +373,12 @@ export async function getReplyFromConfig(
     elevatedEnabled &&
     Boolean(
       messageProviderKey &&
-      isApprovedElevatedSender({
-        provider: messageProviderKey,
-        ctx,
-        allowFrom: elevatedConfig?.allowFrom,
-        discordFallback: discordElevatedFallback,
-      }),
+        isApprovedElevatedSender({
+          provider: messageProviderKey,
+          ctx,
+          allowFrom: elevatedConfig?.allowFrom,
+          discordFallback: discordElevatedFallback,
+        }),
     );
   if (
     directives.hasElevatedDirective &&
@@ -377,6 +403,10 @@ export async function getReplyFromConfig(
     (directives.verboseLevel as VerboseLevel | undefined) ??
     (sessionEntry?.verboseLevel as VerboseLevel | undefined) ??
     (agentCfg?.verboseDefault as VerboseLevel | undefined);
+  const resolvedReasoningLevel: ReasoningLevel =
+    (directives.reasoningLevel as ReasoningLevel | undefined) ??
+    (sessionEntry?.reasoningLevel as ReasoningLevel | undefined) ??
+    "off";
   const resolvedElevatedLevel = elevatedAllowed
     ? ((directives.elevatedLevel as ElevatedLevel | undefined) ??
       (sessionEntry?.elevatedLevel as ElevatedLevel | undefined) ??
@@ -389,7 +419,8 @@ export async function getReplyFromConfig(
     agentCfg?.blockStreamingBreak === "message_end"
       ? "message_end"
       : "text_end";
-  const blockStreamingEnabled = resolvedBlockStreaming === "on";
+  const blockStreamingEnabled =
+    resolvedBlockStreaming === "on" && opts?.disableBlockStreaming !== true;
   const blockReplyChunking = blockStreamingEnabled
     ? resolveBlockStreamingChunking(cfg, sessionCtx.Provider)
     : undefined;
@@ -438,6 +469,17 @@ export async function getReplyFromConfig(
       isGroup,
     })
   ) {
+    const currentThinkLevel =
+      (sessionEntry?.thinkingLevel as ThinkLevel | undefined) ??
+      (agentCfg?.thinkingDefault as ThinkLevel | undefined);
+    const currentVerboseLevel =
+      (sessionEntry?.verboseLevel as VerboseLevel | undefined) ??
+      (agentCfg?.verboseDefault as VerboseLevel | undefined);
+    const currentReasoningLevel =
+      (sessionEntry?.reasoningLevel as ReasoningLevel | undefined) ?? "off";
+    const currentElevatedLevel =
+      (sessionEntry?.elevatedLevel as ElevatedLevel | undefined) ??
+      (agentCfg?.elevatedDefault as ElevatedLevel | undefined);
     const directiveReply = await handleDirectiveOnly({
       cfg,
       directives,
@@ -457,6 +499,10 @@ export async function getReplyFromConfig(
       model,
       initialModelLabel,
       formatModelSwitchEvent,
+      currentThinkLevel,
+      currentVerboseLevel,
+      currentReasoningLevel,
+      currentElevatedLevel,
     });
     typing.cleanup();
     return directiveReply;
@@ -493,10 +539,10 @@ export async function getReplyFromConfig(
   const perMessageQueueOptions =
     directives.hasQueueDirective && !directives.queueReset
       ? {
-        debounceMs: directives.debounceMs,
-        cap: directives.cap,
-        dropPolicy: directives.dropPolicy,
-      }
+          debounceMs: directives.debounceMs,
+          cap: directives.cap,
+          dropPolicy: directives.dropPolicy,
+        }
       : undefined;
 
   const command = buildCommandContext({
@@ -542,6 +588,7 @@ export async function getReplyFromConfig(
     defaultGroupActivation: () => defaultActivation,
     resolvedThinkLevel,
     resolvedVerboseLevel: resolvedVerboseLevel ?? "off",
+    resolvedReasoningLevel,
     resolvedElevatedLevel,
     resolveDefaultThinkingLevel: modelState.resolveDefaultThinkingLevel,
     provider,
@@ -566,19 +613,33 @@ export async function getReplyFromConfig(
   const isGroupChat = sessionCtx.ChatType === "group";
   const wasMentioned = ctx.WasMentioned === true;
   const isHeartbeat = opts?.isHeartbeat === true;
-  const shouldEagerType = (!isGroupChat || wasMentioned) && !isHeartbeat;
+  const typingMode = resolveTypingMode({
+    configured: sessionCfg?.typingMode ?? agentCfg?.typingMode,
+    isGroupChat,
+    wasMentioned,
+    isHeartbeat,
+  });
+  const typingSignals = createTypingSignaler({
+    typing,
+    mode: typingMode,
+    isHeartbeat,
+  });
   const shouldInjectGroupIntro = Boolean(
     isGroupChat &&
-    (isFirstTurnInSession || sessionEntry?.groupActivationNeedsSystemIntro),
+      (isFirstTurnInSession || sessionEntry?.groupActivationNeedsSystemIntro),
   );
   const groupIntro = shouldInjectGroupIntro
     ? buildGroupIntro({
-      sessionCtx,
-      sessionEntry,
-      defaultActivation,
-      silentToken: SILENT_REPLY_TOKEN,
-    })
+        sessionCtx,
+        sessionEntry,
+        defaultActivation,
+        silentToken: SILENT_REPLY_TOKEN,
+      })
     : "";
+  const groupSystemPrompt = sessionCtx.GroupSystemPrompt?.trim() ?? "";
+  const extraSystemPrompt = [groupIntro, groupSystemPrompt]
+    .filter(Boolean)
+    .join("\n\n");
   const baseBody = sessionCtx.BodyStripped ?? sessionCtx.Body ?? "";
   const rawBodyTrimmed = (ctx.Body ?? "").trim();
   const baseBodyTrimmedRaw = baseBody.trim();
@@ -628,6 +689,11 @@ export async function getReplyFromConfig(
     isNewSession,
     prefixedBodyBase,
   });
+  const threadStarterBody = ctx.ThreadStarterBody?.trim();
+  const threadStarterNote =
+    isNewSession && threadStarterBody
+      ? `[Thread starter - for context]\n${threadStarterBody}`
+      : undefined;
   const skillResult = await ensureSkillSnapshot({
     sessionEntry,
     sessionStore,
@@ -637,15 +703,16 @@ export async function getReplyFromConfig(
     isFirstTurnInSession,
     workspaceDir,
     cfg,
+    skillFilter: opts?.skillFilter,
   });
   sessionEntry = skillResult.sessionEntry ?? sessionEntry;
   systemSent = skillResult.systemSent;
   const skillsSnapshot = skillResult.skillsSnapshot;
   const prefixedBody = transcribedText
-    ? [prefixedBodyBase, `Transcript:\n${transcribedText}`]
-      .filter(Boolean)
-      .join("\n\n")
-    : prefixedBodyBase;
+    ? [threadStarterNote, prefixedBodyBase, `Transcript:\n${transcribedText}`]
+        .filter(Boolean)
+        .join("\n\n")
+    : [threadStarterNote, prefixedBodyBase].filter(Boolean).join("\n\n");
   const mediaNote = ctx.MediaPath?.length
     ? `[media attached: ${ctx.MediaPath}${ctx.MediaType ? ` (${ctx.MediaType})` : ""}${ctx.MediaUrl ? ` | ${ctx.MediaUrl}` : ""}]`
     : undefined;
@@ -654,9 +721,9 @@ export async function getReplyFromConfig(
     : undefined;
   let commandBody = mediaNote
     ? [mediaNote, mediaReplyHint, prefixedBody ?? ""]
-      .filter(Boolean)
-      .join("\n")
-      .trim()
+        .filter(Boolean)
+        .join("\n")
+        .trim()
     : prefixedBody;
   if (!resolvedThinkLevel && commandBody) {
     const parts = commandBody.split(/\s+/);
@@ -670,17 +737,17 @@ export async function getReplyFromConfig(
     resolvedThinkLevel = await modelState.resolveDefaultThinkingLevel();
   }
   const sessionIdFinal = sessionId ?? crypto.randomUUID();
-  const sessionFile = resolveSessionTranscriptPath(sessionIdFinal);
+  const sessionFile = resolveSessionFilePath(sessionIdFinal, sessionEntry);
   const queueBodyBase = transcribedText
-    ? [baseBodyFinal, `Transcript:\n${transcribedText}`]
-      .filter(Boolean)
-      .join("\n\n")
-    : baseBodyFinal;
+    ? [threadStarterNote, baseBodyFinal, `Transcript:\n${transcribedText}`]
+        .filter(Boolean)
+        .join("\n\n")
+    : [threadStarterNote, baseBodyFinal].filter(Boolean).join("\n\n");
   const queuedBody = mediaNote
     ? [mediaNote, mediaReplyHint, queueBodyBase]
-      .filter(Boolean)
-      .join("\n")
-      .trim()
+        .filter(Boolean)
+        .join("\n")
+        .trim()
     : queueBodyBase;
   const resolvedQueue = resolveQueueSettings({
     cfg,
@@ -714,6 +781,11 @@ export async function getReplyFromConfig(
     prompt: queuedBody,
     summaryLine: baseBodyTrimmedRaw,
     enqueuedAt: Date.now(),
+    // Originating channel for reply routing.
+    originatingChannel: ctx.OriginatingChannel,
+    originatingTo: ctx.OriginatingTo,
+    originatingAccountId: ctx.AccountId,
+    originatingThreadId: ctx.MessageThreadId,
     run: {
       agentId,
       agentDir,
@@ -729,6 +801,7 @@ export async function getReplyFromConfig(
       authProfileId,
       thinkLevel: resolvedThinkLevel,
       verboseLevel: resolvedVerboseLevel,
+      reasoningLevel: resolvedReasoningLevel,
       elevatedLevel: resolvedElevatedLevel,
       bashElevated: {
         enabled: elevatedEnabled,
@@ -739,13 +812,13 @@ export async function getReplyFromConfig(
       blockReplyBreak: resolvedBlockStreamingBreak,
       ownerNumbers:
         command.ownerList.length > 0 ? command.ownerList : undefined,
-      extraSystemPrompt: groupIntro || undefined,
+      extraSystemPrompt: extraSystemPrompt || undefined,
       ...(provider === "ollama" ? { enforceFinalTag: true } : {}),
     },
   };
 
-  if (shouldEagerType) {
-    await typing.startTypingLoop();
+  if (typingSignals.shouldStartImmediately) {
+    await typingSignals.signalRunStart();
   }
 
   return runReplyAgent({
@@ -772,6 +845,7 @@ export async function getReplyFromConfig(
     resolvedBlockStreamingBreak,
     sessionCtx,
     shouldInjectGroupIntro,
+    typingMode,
   });
 }
 
@@ -784,23 +858,14 @@ async function stageSandboxMedia(params: {
 }) {
   const { ctx, sessionCtx, cfg, sessionKey, workspaceDir } = params;
   const rawPath = ctx.MediaPath?.trim();
-  if (!rawPath) return;
+  if (!rawPath || !sessionKey) return;
 
-  // Always copy media to workspace (regardless of sandbox mode)
-  // This ensures uploaded files are accessible to tools like Gemini
-  let targetWorkspaceDir = workspaceDir;
-
-  // If sandboxing is enabled, use the sandbox workspace
-  if (sessionKey) {
-    const sandbox = await ensureSandboxWorkspaceForSession({
-      config: cfg,
-      sessionKey,
-      workspaceDir,
-    });
-    if (sandbox) {
-      targetWorkspaceDir = sandbox.workspaceDir;
-    }
-  }
+  const sandbox = await ensureSandboxWorkspaceForSession({
+    config: cfg,
+    sessionKey,
+    workspaceDir,
+  });
+  if (!sandbox) return;
 
   let source = rawPath;
   if (source.startsWith("file://")) {
@@ -818,7 +883,7 @@ async function stageSandboxMedia(params: {
   try {
     const fileName = path.basename(source);
     if (!fileName) return;
-    const destDir = path.join(targetWorkspaceDir, "media", "inbound");
+    const destDir = path.join(sandbox.workspaceDir, "media", "inbound");
     await fs.mkdir(destDir, { recursive: true });
     const dest = path.join(destDir, fileName);
     await fs.copyFile(source, dest);
@@ -842,6 +907,6 @@ async function stageSandboxMedia(params: {
       }
     }
   } catch (err) {
-    logVerbose(`Failed to stage inbound media for workspace: ${String(err)}`);
+    logVerbose(`Failed to stage inbound media for sandbox: ${String(err)}`);
   }
 }

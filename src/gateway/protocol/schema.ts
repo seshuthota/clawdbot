@@ -323,6 +323,7 @@ export const SessionsPatchParamsSchema = Type.Object(
     key: NonEmptyString,
     thinkingLevel: Type.Optional(Type.Union([NonEmptyString, Type.Null()])),
     verboseLevel: Type.Optional(Type.Union([NonEmptyString, Type.Null()])),
+    reasoningLevel: Type.Optional(Type.Union([NonEmptyString, Type.Null()])),
     elevatedLevel: Type.Optional(Type.Union([NonEmptyString, Type.Null()])),
     model: Type.Optional(Type.Union([NonEmptyString, Type.Null()])),
     spawnedBy: Type.Optional(Type.Union([NonEmptyString, Type.Null()])),
@@ -373,8 +374,28 @@ export const ConfigSetParamsSchema = Type.Object(
   { additionalProperties: false },
 );
 
+export const ConfigApplyParamsSchema = Type.Object(
+  {
+    raw: NonEmptyString,
+    sessionKey: Type.Optional(Type.String()),
+    note: Type.Optional(Type.String()),
+    restartDelayMs: Type.Optional(Type.Integer({ minimum: 0 })),
+  },
+  { additionalProperties: false },
+);
+
 export const ConfigSchemaParamsSchema = Type.Object(
   {},
+  { additionalProperties: false },
+);
+
+export const UpdateRunParamsSchema = Type.Object(
+  {
+    sessionKey: Type.Optional(Type.String()),
+    note: Type.Optional(Type.String()),
+    restartDelayMs: Type.Optional(Type.Integer({ minimum: 0 })),
+    timeoutMs: Type.Optional(Type.Integer({ minimum: 1 })),
+  },
   { additionalProperties: false },
 );
 
@@ -787,6 +808,27 @@ export const CronRunLogEntrySchema = Type.Object(
   { additionalProperties: false },
 );
 
+export const LogsTailParamsSchema = Type.Object(
+  {
+    cursor: Type.Optional(Type.Integer({ minimum: 0 })),
+    limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 5000 })),
+    maxBytes: Type.Optional(Type.Integer({ minimum: 1, maximum: 1_000_000 })),
+  },
+  { additionalProperties: false },
+);
+
+export const LogsTailResultSchema = Type.Object(
+  {
+    file: NonEmptyString,
+    cursor: Type.Integer({ minimum: 0 }),
+    size: Type.Integer({ minimum: 0 }),
+    lines: Type.Array(Type.String()),
+    truncated: Type.Optional(Type.Boolean()),
+    reset: Type.Optional(Type.Boolean()),
+  },
+  { additionalProperties: false },
+);
+
 // WebChat/WebSocket-native chat methods
 export const ChatHistoryParamsSchema = Type.Object(
   {
@@ -869,6 +911,7 @@ export const ProtocolSchemas: Record<string, TSchema> = {
   SessionsCompactParams: SessionsCompactParamsSchema,
   ConfigGetParams: ConfigGetParamsSchema,
   ConfigSetParams: ConfigSetParamsSchema,
+  ConfigApplyParams: ConfigApplyParamsSchema,
   ConfigSchemaParams: ConfigSchemaParamsSchema,
   ConfigSchemaResponse: ConfigSchemaResponseSchema,
   WizardStartParams: WizardStartParamsSchema,
@@ -898,10 +941,13 @@ export const ProtocolSchemas: Record<string, TSchema> = {
   CronRunParams: CronRunParamsSchema,
   CronRunsParams: CronRunsParamsSchema,
   CronRunLogEntry: CronRunLogEntrySchema,
+  LogsTailParams: LogsTailParamsSchema,
+  LogsTailResult: LogsTailResultSchema,
   ChatHistoryParams: ChatHistoryParamsSchema,
   ChatSendParams: ChatSendParamsSchema,
   ChatAbortParams: ChatAbortParamsSchema,
   ChatEvent: ChatEventSchema,
+  UpdateRunParams: UpdateRunParamsSchema,
   TickEvent: TickEventSchema,
   ShutdownEvent: ShutdownEventSchema,
 };
@@ -938,6 +984,7 @@ export type SessionsDeleteParams = Static<typeof SessionsDeleteParamsSchema>;
 export type SessionsCompactParams = Static<typeof SessionsCompactParamsSchema>;
 export type ConfigGetParams = Static<typeof ConfigGetParamsSchema>;
 export type ConfigSetParams = Static<typeof ConfigSetParamsSchema>;
+export type ConfigApplyParams = Static<typeof ConfigApplyParamsSchema>;
 export type ConfigSchemaParams = Static<typeof ConfigSchemaParamsSchema>;
 export type ConfigSchemaResponse = Static<typeof ConfigSchemaResponseSchema>;
 export type WizardStartParams = Static<typeof WizardStartParamsSchema>;
@@ -967,8 +1014,11 @@ export type CronRemoveParams = Static<typeof CronRemoveParamsSchema>;
 export type CronRunParams = Static<typeof CronRunParamsSchema>;
 export type CronRunsParams = Static<typeof CronRunsParamsSchema>;
 export type CronRunLogEntry = Static<typeof CronRunLogEntrySchema>;
+export type LogsTailParams = Static<typeof LogsTailParamsSchema>;
+export type LogsTailResult = Static<typeof LogsTailResultSchema>;
 export type ChatAbortParams = Static<typeof ChatAbortParamsSchema>;
 export type ChatEvent = Static<typeof ChatEventSchema>;
+export type UpdateRunParams = Static<typeof UpdateRunParamsSchema>;
 export type TickEvent = Static<typeof TickEventSchema>;
 export type ShutdownEvent = Static<typeof ShutdownEventSchema>;
 

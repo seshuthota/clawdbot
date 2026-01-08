@@ -28,6 +28,8 @@ import type {
   CronRunLogEntry,
   CronStatus,
   HealthSnapshot,
+  LogEntry,
+  LogLevel,
   PresenceEntry,
   ProvidersStatusSnapshot,
   SessionsListResult,
@@ -77,6 +79,7 @@ import {
   loadSkills,
 } from "./controllers/skills";
 import { loadDebug } from "./controllers/debug";
+import { loadLogs } from "./controllers/logs";
 
 type EventLogEntry = {
   ts: number;
@@ -85,6 +88,14 @@ type EventLogEntry = {
 };
 
 const TOOL_STREAM_LIMIT = 50;
+const DEFAULT_LOG_LEVEL_FILTERS: Record<LogLevel, boolean> = {
+  trace: true,
+  debug: true,
+  info: true,
+  warn: true,
+  error: true,
+  fatal: true,
+};
 
 type AgentEventPayload = {
   runId: string;
@@ -199,6 +210,9 @@ export class ClawdbotApp extends LitElement {
   @state() configValid: boolean | null = null;
   @state() configIssues: unknown[] = [];
   @state() configSaving = false;
+  @state() configApplying = false;
+  @state() updateRunning = false;
+  @state() applySessionKey = this.settings.lastActiveSessionKey;
   @state() configSnapshot: ConfigSnapshot | null = null;
   @state() configSchema: unknown | null = null;
   @state() configSchemaVersion: string | null = null;
@@ -340,11 +354,29 @@ export class ClawdbotApp extends LitElement {
   @state() debugCallResult: string | null = null;
   @state() debugCallError: string | null = null;
 
+  @state() logsLoading = false;
+  @state() logsError: string | null = null;
+  @state() logsFile: string | null = null;
+  @state() logsEntries: LogEntry[] = [];
+  @state() logsFilterText = "";
+  @state() logsLevelFilters: Record<LogLevel, boolean> = {
+    ...DEFAULT_LOG_LEVEL_FILTERS,
+  };
+  @state() logsAutoFollow = true;
+  @state() logsTruncated = false;
+  @state() logsCursor: number | null = null;
+  @state() logsLastFetchAt: number | null = null;
+  @state() logsLimit = 500;
+  @state() logsMaxBytes = 250_000;
+  @state() logsAtBottom = true;
+
   client: GatewayBrowserClient | null = null;
   private chatScrollFrame: number | null = null;
   private chatScrollTimeout: number | null = null;
   private chatHasAutoScrolled = false;
   private nodesPollInterval: number | null = null;
+  private logsPollInterval: number | null = null;
+  private logsScrollFrame: number | null = null;
   private toolStreamById = new Map<string, ToolStreamEntry>();
   private toolStreamOrder: string[] = [];
   basePath = "";
@@ -367,6 +399,7 @@ export class ClawdbotApp extends LitElement {
     this.applySettingsFromUrl();
     this.connect();
     this.startNodesPolling();
+    if (this.tab === "logs") this.startLogsPolling();
   }
 
   protected firstUpdated() {
@@ -376,6 +409,7 @@ export class ClawdbotApp extends LitElement {
   disconnectedCallback() {
     window.removeEventListener("popstate", this.popStateHandler);
     this.stopNodesPolling();
+    this.stopLogsPolling();
     this.detachThemeListener();
     this.topbarObserver?.disconnect();
     this.topbarObserver = null;
@@ -397,6 +431,14 @@ export class ClawdbotApp extends LitElement {
         changed.get("chatLoading") === true &&
         this.chatLoading === false;
       this.scheduleChatScroll(forcedByTab || forcedByLoad || !this.chatHasAutoScrolled);
+    }
+    if (
+      this.tab === "logs" &&
+      (changed.has("logsEntries") || changed.has("logsAutoFollow") || changed.has("tab"))
+    ) {
+      if (this.logsAutoFollow && this.logsAtBottom) {
+        this.scheduleLogsScroll(changed.has("tab") || changed.has("logsAutoFollow"));
+      }
     }
   }
 
@@ -500,6 +542,56 @@ export class ClawdbotApp extends LitElement {
     if (this.nodesPollInterval == null) return;
     clearInterval(this.nodesPollInterval);
     this.nodesPollInterval = null;
+  }
+
+  private startLogsPolling() {
+    if (this.logsPollInterval != null) return;
+    this.logsPollInterval = window.setInterval(() => {
+      if (this.tab !== "logs") return;
+      void loadLogs(this, { quiet: true });
+    }, 2000);
+  }
+
+  private stopLogsPolling() {
+    if (this.logsPollInterval == null) return;
+    clearInterval(this.logsPollInterval);
+    this.logsPollInterval = null;
+  }
+
+  private scheduleLogsScroll(force = false) {
+    if (this.logsScrollFrame) cancelAnimationFrame(this.logsScrollFrame);
+    void this.updateComplete.then(() => {
+      this.logsScrollFrame = requestAnimationFrame(() => {
+        this.logsScrollFrame = null;
+        const container = this.querySelector(".log-stream") as HTMLElement | null;
+        if (!container) return;
+        const distanceFromBottom =
+          container.scrollHeight - container.scrollTop - container.clientHeight;
+        const shouldStick = force || distanceFromBottom < 80;
+        if (!shouldStick) return;
+        container.scrollTop = container.scrollHeight;
+      });
+    });
+  }
+
+  handleLogsScroll(event: Event) {
+    const container = event.currentTarget as HTMLElement | null;
+    if (!container) return;
+    const distanceFromBottom =
+      container.scrollHeight - container.scrollTop - container.clientHeight;
+    this.logsAtBottom = distanceFromBottom < 80;
+  }
+
+  exportLogs(lines: string[], label: string) {
+    if (lines.length === 0) return;
+    const blob = new Blob([`${lines.join("\n")}\n`], { type: "text/plain" });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
+    anchor.href = url;
+    anchor.download = `clawdbot-logs-${label}-${stamp}.log`;
+    anchor.click();
+    URL.revokeObjectURL(url);
   }
 
   resetToolStream() {
@@ -616,6 +708,9 @@ export class ClawdbotApp extends LitElement {
 
     if (evt.event === "chat") {
       const payload = evt.payload as ChatEventPayload | undefined;
+      if (payload?.sessionKey) {
+        this.setLastActiveSessionKey(payload.sessionKey);
+      }
       const state = handleChatEvent(this, payload);
       if (state === "final" || state === "error" || state === "aborted") {
         this.resetToolStream();
@@ -652,23 +747,53 @@ export class ClawdbotApp extends LitElement {
   }
 
   applySettings(next: UiSettings) {
-    this.settings = next;
-    saveSettings(next);
+    const normalized = {
+      ...next,
+      lastActiveSessionKey:
+        next.lastActiveSessionKey?.trim() || next.sessionKey.trim() || "main",
+    };
+    this.settings = normalized;
+    saveSettings(normalized);
     if (next.theme !== this.theme) {
       this.theme = next.theme;
       this.applyResolvedTheme(resolveTheme(next.theme));
     }
+    this.applySessionKey = this.settings.lastActiveSessionKey;
+  }
+
+  private setLastActiveSessionKey(next: string) {
+    const trimmed = next.trim();
+    if (!trimmed) return;
+    if (this.settings.lastActiveSessionKey === trimmed) return;
+    this.applySettings({ ...this.settings, lastActiveSessionKey: trimmed });
   }
 
   private applySettingsFromUrl() {
     if (!window.location.search) return;
     const params = new URLSearchParams(window.location.search);
-    const token = params.get("token")?.trim();
-    if (!token) return;
-    if (!this.settings.token) {
-      this.applySettings({ ...this.settings, token });
+    const tokenRaw = params.get("token");
+    const passwordRaw = params.get("password");
+    let changed = false;
+
+    if (tokenRaw != null) {
+      const token = tokenRaw.trim();
+      if (token && !this.settings.token) {
+        this.applySettings({ ...this.settings, token });
+        changed = true;
+      }
+      params.delete("token");
     }
-    params.delete("token");
+
+    if (passwordRaw != null) {
+      const password = passwordRaw.trim();
+      if (password) {
+        this.password = password;
+        changed = true;
+      }
+      params.delete("password");
+    }
+
+    if (!changed && tokenRaw == null && passwordRaw == null) return;
     const url = new URL(window.location.href);
     url.search = params.toString();
     window.history.replaceState({}, "", url.toString());
@@ -677,6 +802,8 @@ export class ClawdbotApp extends LitElement {
   setTab(next: Tab) {
     if (this.tab !== next) this.tab = next;
     if (next === "chat") this.chatHasAutoScrolled = false;
+    if (next === "logs") this.startLogsPolling();
+    else this.stopLogsPolling();
     void this.refreshActiveTab();
     this.syncUrlWithTab(next, false);
   }
@@ -714,6 +841,9 @@ export class ClawdbotApp extends LitElement {
     if (this.tab === "debug") {
       await loadDebug(this);
       this.eventLog = this.eventLogBuffer;
+    }
+    if (this.tab === "logs") {
+      await loadLogs(this, { reset: true });
     }
   }
 
@@ -788,6 +918,8 @@ export class ClawdbotApp extends LitElement {
   private setTabFromRoute(next: Tab) {
     if (this.tab !== next) this.tab = next;
     if (next === "chat") this.chatHasAutoScrolled = false;
+    if (next === "logs") this.startLogsPolling();
+    else this.stopLogsPolling();
     if (this.connected) void this.refreshActiveTab();
   }
 
@@ -826,6 +958,9 @@ export class ClawdbotApp extends LitElement {
     if (!this.connected) return;
     this.resetToolStream();
     const ok = await sendChat(this);
+    if (ok) {
+      this.setLastActiveSessionKey(this.sessionKey);
+    }
     if (ok && this.chatRunId) {
       // chat.send returned (run finished), but we missed the chat final event.
       this.chatRunId = null;

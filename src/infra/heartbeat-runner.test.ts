@@ -6,6 +6,11 @@ import { HEARTBEAT_PROMPT } from "../auto-reply/heartbeat.js";
 import * as replyModule from "../auto-reply/reply.js";
 import type { ClawdbotConfig } from "../config/config.js";
 import {
+  resolveAgentIdFromSessionKey,
+  resolveMainSessionKey,
+  resolveStorePath,
+} from "../config/sessions.js";
+import {
   resolveHeartbeatIntervalMs,
   resolveHeartbeatPrompt,
   runHeartbeatOnce,
@@ -184,6 +189,72 @@ describe("runHeartbeatOnce", () => {
     }
   });
 
+  it("loads the default agent session from templated stores", async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "clawdbot-hb-"));
+    const storeTemplate = path.join(
+      tmpDir,
+      "agents",
+      "{agentId}",
+      "sessions.json",
+    );
+    const replySpy = vi.spyOn(replyModule, "getReplyFromConfig");
+    try {
+      const cfg: ClawdbotConfig = {
+        routing: { defaultAgentId: "work" },
+        agent: { heartbeat: { every: "5m" } },
+        whatsapp: { allowFrom: ["*"] },
+        session: { store: storeTemplate },
+      };
+      const sessionKey = resolveMainSessionKey(cfg);
+      const agentId = resolveAgentIdFromSessionKey(sessionKey);
+      const storePath = resolveStorePath(storeTemplate, { agentId });
+
+      await fs.mkdir(path.dirname(storePath), { recursive: true });
+      await fs.writeFile(
+        storePath,
+        JSON.stringify(
+          {
+            [sessionKey]: {
+              sessionId: "sid",
+              updatedAt: Date.now(),
+              lastProvider: "whatsapp",
+              lastTo: "+1555",
+            },
+          },
+          null,
+          2,
+        ),
+      );
+
+      replySpy.mockResolvedValue({ text: "Hello from heartbeat" });
+      const sendWhatsApp = vi.fn().mockResolvedValue({
+        messageId: "m1",
+        toJid: "jid",
+      });
+
+      await runHeartbeatOnce({
+        cfg,
+        deps: {
+          sendWhatsApp,
+          getQueueSize: () => 0,
+          nowMs: () => 0,
+          webAuthExists: async () => true,
+          hasActiveWebListener: () => true,
+        },
+      });
+
+      expect(sendWhatsApp).toHaveBeenCalledTimes(1);
+      expect(sendWhatsApp).toHaveBeenCalledWith(
+        "+1555",
+        "Hello from heartbeat",
+        expect.any(Object),
+      );
+    } finally {
+      replySpy.mockRestore();
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
   it("respects ackMaxChars for heartbeat acks", async () => {
     const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "clawdbot-hb-"));
     const storePath = path.join(tmpDir, "sessions.json");
@@ -347,7 +418,7 @@ describe("runHeartbeatOnce", () => {
       expect(sendTelegram).toHaveBeenCalledWith(
         "123456",
         "Hello from heartbeat",
-        expect.objectContaining({ token: "test-bot-token-123" }),
+        expect.objectContaining({ accountId: "default", verbose: false }),
       );
     } finally {
       replySpy.mockRestore();

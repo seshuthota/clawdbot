@@ -38,6 +38,12 @@ clawdbot configure
 **Remote mode** only configures the local client to connect to a Gateway elsewhere.
 It does **not** install or change anything on the remote host.
 
+To add more isolated agents (separate workspace + sessions + auth), use:
+
+```bash
+clawdbot agents add <name>
+```
+
 ## Flow details (local)
 
 1) **Existing config detection**
@@ -73,7 +79,7 @@ It does **not** install or change anything on the remote host.
    - Discord: bot token.
    - Signal: optional `signal-cli` install + account config.
    - iMessage: local `imsg` CLI path + DB access.
-   - DM security: default is pairing (unknown DMs get a pairing code). Approve via `clawdbot pairing approve --provider <provider> <code>`.
+  - DM security: default is pairing. First DM sends a code; approve via `clawdbot pairing approve --provider <provider> <code>` or use allowlists.
 
 6) **Daemon install**
    - macOS: LaunchAgent
@@ -93,7 +99,8 @@ It does **not** install or change anything on the remote host.
 
 9) **Finish**
    - Summary + next steps, including iOS/Android/macOS apps for extra features.
-   - If no GUI is detected, the wizard prints SSH port-forward instructions for the Control UI instead of opening a browser.
+  - If no GUI is detected, the wizard prints SSH port-forward instructions for the Control UI instead of opening a browser.
+  - If the Control UI assets are missing, the wizard attempts to build them; fallback is `pnpm ui:install && pnpm ui:build`.
 
 ## Remote mode
 
@@ -109,6 +116,20 @@ Notes:
 - Discovery hints:
   - macOS: Bonjour (`dns-sd`)
   - Linux: Avahi (`avahi-browse`)
+
+## Add another agent
+
+Use `clawdbot agents add <name>` to create a separate agent with its own workspace,
+sessions, and auth profiles. Running without `--workspace` launches the wizard.
+
+What it sets:
+- `routing.agents.<agentId>.name`
+- `routing.agents.<agentId>.workspace`
+- `routing.agents.<agentId>.agentDir`
+
+Notes:
+- Default workspaces follow `~/clawd-<agentId>`.
+- Add `routing.bindings` to route inbound messages (the wizard can do this).
 
 ## Non‑interactive mode
 
@@ -127,6 +148,12 @@ clawdbot onboard --non-interactive \
 ```
 
 Add `--json` for a machine‑readable summary.
+
+Add agent (non‑interactive) example:
+
+```bash
+clawdbot agents add work --workspace ~/clawd-work
+```
 
 ## Gateway wizard RPC
 
@@ -158,6 +185,8 @@ Typical fields in `~/.clawdbot/clawdbot.json`:
 - `wizard.lastRunCommit`
 - `wizard.lastRunCommand`
 - `wizard.lastRunMode`
+
+`clawdbot agents add` writes `routing.agents.<agentId>` and optional `routing.bindings`.
 
 WhatsApp credentials go under `~/.clawdbot/credentials/whatsapp/<accountId>/`.
 Sessions are stored under `~/.clawdbot/agents/<agentId>/sessions/`.

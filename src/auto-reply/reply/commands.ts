@@ -14,21 +14,26 @@ import {
 } from "../../agents/pi-embedded.js";
 import type { ClawdbotConfig } from "../../config/config.js";
 import {
-  resolveSessionTranscriptPath,
+  resolveSessionFilePath,
   type SessionEntry,
   type SessionScope,
   saveSessionStore,
 } from "../../config/sessions.js";
 import { logVerbose } from "../../globals.js";
+import {
+  formatUsageSummaryLine,
+  loadProviderUsageSummary,
+} from "../../infra/provider-usage.js";
 import { triggerClawdbotRestart } from "../../infra/restart.js";
 import { enqueueSystemEvent } from "../../infra/system-events.js";
 import { parseAgentSessionKey } from "../../routing/session-key.js";
 import { resolveSendPolicy } from "../../sessions/send-policy.js";
 import { normalizeE164 } from "../../utils.js";
-import { resolveHeartbeatSeconds } from "../../web/reconnect.js";
-import { getWebAuthAgeMs, webAuthExists } from "../../web/session.js";
 import { resolveCommandAuthorization } from "../command-auth.js";
-import { shouldHandleTextCommands } from "../commands-registry.js";
+import {
+  normalizeCommandBody,
+  shouldHandleTextCommands,
+} from "../commands-registry.js";
 import {
   normalizeGroupActivation,
   parseActivationCommand,
@@ -41,11 +46,17 @@ import {
   formatTokenCount,
 } from "../status.js";
 import type { MsgContext } from "../templating.js";
-import type { ElevatedLevel, ThinkLevel, VerboseLevel } from "../thinking.js";
+import type {
+  ElevatedLevel,
+  ReasoningLevel,
+  ThinkLevel,
+  VerboseLevel,
+} from "../thinking.js";
 import type { ReplyPayload } from "../types.js";
 import { isAbortTrigger, setAbortMemory } from "./abort.js";
 import type { InlineDirectives } from "./directive-handling.js";
 import { stripMentions, stripStructuralPrefixes } from "./mentions.js";
+import { getFollowupQueueDepth, resolveQueueSettings } from "./queue.js";
 import { incrementCompactionCount } from "./session-updates.js";
 
 function resolveSessionEntryForKey(
@@ -146,9 +157,9 @@ export function buildCommandContext(params: {
   const abortKey =
     sessionKey ?? (auth.from || undefined) ?? (auth.to || undefined);
   const rawBodyNormalized = triggerBodyNormalized;
-  const commandBodyNormalized = isGroup
-    ? stripMentions(rawBodyNormalized, ctx, cfg)
-    : rawBodyNormalized;
+  const commandBodyNormalized = normalizeCommandBody(
+    isGroup ? stripMentions(rawBodyNormalized, ctx, cfg) : rawBodyNormalized,
+  );
 
   return {
     surface,
@@ -202,6 +213,7 @@ export async function handleCommands(params: {
   defaultGroupActivation: () => "always" | "mention";
   resolvedThinkLevel?: ThinkLevel;
   resolvedVerboseLevel: VerboseLevel;
+  resolvedReasoningLevel: ReasoningLevel;
   resolvedElevatedLevel?: ElevatedLevel;
   resolveDefaultThinkingLevel: () => Promise<ThinkLevel | undefined>;
   provider: string;
@@ -226,6 +238,7 @@ export async function handleCommands(params: {
     defaultGroupActivation,
     resolvedThinkLevel,
     resolvedVerboseLevel,
+    resolvedReasoningLevel,
     resolvedElevatedLevel,
     resolveDefaultThinkingLevel,
     provider,
@@ -377,9 +390,27 @@ export async function handleCommands(params: {
       );
       return { shouldContinue: false };
     }
-    const webLinked = await webAuthExists();
-    const webAuthAgeMs = getWebAuthAgeMs();
-    const heartbeatSeconds = resolveHeartbeatSeconds(cfg, undefined);
+    let usageLine: string | null = null;
+    try {
+      const usageSummary = await loadProviderUsageSummary({
+        timeoutMs: 3500,
+      });
+      usageLine = formatUsageSummaryLine(usageSummary, { now: Date.now() });
+    } catch {
+      usageLine = null;
+    }
+    const queueSettings = resolveQueueSettings({
+      cfg,
+      provider: command.provider,
+      sessionEntry,
+    });
+    const queueKey = sessionKey ?? sessionEntry?.sessionId;
+    const queueDepth = queueKey ? getFollowupQueueDepth(queueKey) : 0;
+    const queueOverrides = Boolean(
+      sessionEntry?.queueDebounceMs ??
+        sessionEntry?.queueCap ??
+        sessionEntry?.queueDrop,
+    );
     const groupActivation = isGroup
       ? (normalizeGroupActivation(sessionEntry?.groupActivation) ??
         defaultGroupActivation())
@@ -396,20 +427,26 @@ export async function handleCommands(params: {
         verboseDefault: cfg.agent?.verboseDefault,
         elevatedDefault: cfg.agent?.elevatedDefault,
       },
-      workspaceDir,
       sessionEntry,
       sessionKey,
       sessionScope,
-      storePath,
       groupActivation,
       resolvedThink:
         resolvedThinkLevel ?? (await resolveDefaultThinkingLevel()),
       resolvedVerbose: resolvedVerboseLevel,
+      resolvedReasoning: resolvedReasoningLevel,
       resolvedElevated: resolvedElevatedLevel,
       modelAuth: resolveModelAuthLabel(provider, cfg),
-      webLinked,
-      webAuthAgeMs,
-      heartbeatSeconds,
+      usageLine: usageLine ?? undefined,
+      queue: {
+        mode: queueSettings.mode,
+        depth: queueDepth,
+        debounceMs: queueSettings.debounceMs,
+        cap: queueSettings.cap,
+        dropPolicy: queueSettings.dropPolicy,
+        showDetails: queueOverrides,
+      },
+      includeTranscriptUsage: false,
     });
     return { shouldContinue: false, reply: { text: statusText } };
   }
@@ -475,7 +512,7 @@ export async function handleCommands(params: {
       sessionId,
       sessionKey,
       messageProvider: command.provider,
-      sessionFile: resolveSessionTranscriptPath(sessionId),
+      sessionFile: resolveSessionFilePath(sessionId, sessionEntry),
       workspaceDir,
       config: cfg,
       skillsSnapshot: sessionEntry.skillsSnapshot,

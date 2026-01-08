@@ -1,8 +1,54 @@
-import { describe, expect, it, vi } from "vitest";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+let originalIsTTY: boolean | undefined;
+let originalStateDir: string | undefined;
+let tempStateDir: string | undefined;
+
+function setStdinTty(value: boolean | undefined) {
+  try {
+    Object.defineProperty(process.stdin, "isTTY", {
+      value,
+      configurable: true,
+    });
+  } catch {
+    // ignore
+  }
+}
+
+beforeEach(() => {
+  originalIsTTY = process.stdin.isTTY;
+  setStdinTty(true);
+  originalStateDir = process.env.CLAWDBOT_STATE_DIR;
+  tempStateDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), "clawdbot-doctor-state-"),
+  );
+  process.env.CLAWDBOT_STATE_DIR = tempStateDir;
+  fs.mkdirSync(path.join(tempStateDir, "agents", "main", "sessions"), {
+    recursive: true,
+  });
+  fs.mkdirSync(path.join(tempStateDir, "credentials"), { recursive: true });
+});
+
+afterEach(() => {
+  setStdinTty(originalIsTTY);
+  if (originalStateDir === undefined) {
+    delete process.env.CLAWDBOT_STATE_DIR;
+  } else {
+    process.env.CLAWDBOT_STATE_DIR = originalStateDir;
+  }
+  if (tempStateDir) {
+    fs.rmSync(tempStateDir, { recursive: true, force: true });
+    tempStateDir = undefined;
+  }
+});
 
 const readConfigFileSnapshot = vi.fn();
 const confirm = vi.fn().mockResolvedValue(true);
 const select = vi.fn().mockResolvedValue("node");
+const note = vi.fn();
 const writeConfigFile = vi.fn().mockResolvedValue(undefined);
 const migrateLegacyConfig = vi.fn((raw: unknown) => ({
   config: raw as Record<string, unknown>,
@@ -17,6 +63,10 @@ const runCommandWithTimeout = vi.fn().mockResolvedValue({
   signal: null,
   killed: false,
 });
+
+const ensureAuthProfileStore = vi
+  .fn()
+  .mockReturnValue({ version: 1, profiles: {} });
 
 const legacyReadConfigFileSnapshot = vi.fn().mockResolvedValue({
   path: "/tmp/clawdis.json",
@@ -34,6 +84,8 @@ const createConfigIO = vi.fn(() => ({
 
 const findLegacyGatewayServices = vi.fn().mockResolvedValue([]);
 const uninstallLegacyGatewayServices = vi.fn().mockResolvedValue([]);
+const findExtraGatewayServices = vi.fn().mockResolvedValue([]);
+const renderGatewayServiceCleanupHints = vi.fn().mockReturnValue(["cleanup"]);
 const resolveGatewayProgramArguments = vi.fn().mockResolvedValue({
   programArguments: ["node", "cli", "gateway-daemon", "--port", "18789"],
 });
@@ -46,7 +98,7 @@ const serviceUninstall = vi.fn().mockResolvedValue(undefined);
 vi.mock("@clack/prompts", () => ({
   confirm,
   intro: vi.fn(),
-  note: vi.fn(),
+  note,
   outro: vi.fn(),
   select,
 }));
@@ -72,6 +124,11 @@ vi.mock("../daemon/legacy.js", () => ({
   uninstallLegacyGatewayServices,
 }));
 
+vi.mock("../daemon/inspect.js", () => ({
+  findExtraGatewayServices,
+  renderGatewayServiceCleanupHints,
+}));
+
 vi.mock("../daemon/program-args.js", () => ({
   resolveGatewayProgramArguments,
 }));
@@ -80,6 +137,14 @@ vi.mock("../process/exec.js", () => ({
   runExec,
   runCommandWithTimeout,
 }));
+
+vi.mock("../agents/auth-profiles.js", async (importOriginal) => {
+  const actual = await importOriginal();
+  return {
+    ...actual,
+    ensureAuthProfileStore,
+  };
+});
 
 vi.mock("../daemon/service.js", () => ({
   resolveGatewayService: () => ({
@@ -92,6 +157,7 @@ vi.mock("../daemon/service.js", () => ({
     restart: serviceRestart,
     isLoaded: serviceIsLoaded,
     readCommand: vi.fn(),
+    readRuntime: vi.fn().mockResolvedValue({ status: "running" }),
   }),
 }));
 
@@ -372,6 +438,109 @@ describe("doctor", () => {
     expect(docker.image).toBe("clawdbot-sandbox");
     expect(docker.containerPrefix).toBe("clawdbot-sbx");
   });
+
+  it("warns when per-agent sandbox docker/browser/prune overrides are ignored under shared scope", async () => {
+    readConfigFileSnapshot.mockResolvedValue({
+      path: "/tmp/clawdbot.json",
+      exists: true,
+      raw: "{}",
+      parsed: {},
+      valid: true,
+      config: {
+        agent: {
+          sandbox: {
+            mode: "all",
+            scope: "shared",
+          },
+        },
+        routing: {
+          agents: {
+            work: {
+              workspace: "~/clawd-work",
+              sandbox: {
+                mode: "all",
+                scope: "shared",
+                docker: {
+                  setupCommand: "echo work",
+                },
+              },
+            },
+          },
+        },
+      },
+      issues: [],
+      legacyIssues: [],
+    });
+
+    note.mockClear();
+
+    const { doctorCommand } = await import("./doctor.js");
+    const runtime = {
+      log: vi.fn(),
+      error: vi.fn(),
+      exit: vi.fn(),
+    };
+
+    await doctorCommand(runtime, { nonInteractive: true });
+
+    expect(
+      note.mock.calls.some(
+        ([message, title]) =>
+          title === "Sandbox" &&
+          typeof message === "string" &&
+          message.includes("routing.agents.work.sandbox") &&
+          message.includes('scope resolves to "shared"'),
+      ),
+    ).toBe(true);
+  });
+
+  it("warns when legacy workspace directories exist", async () => {
+    readConfigFileSnapshot.mockResolvedValue({
+      path: "/tmp/clawdbot.json",
+      exists: true,
+      raw: "{}",
+      parsed: {},
+      valid: true,
+      config: {
+        agent: { workspace: "/Users/steipete/clawd" },
+      },
+      issues: [],
+      legacyIssues: [],
+    });
+
+    note.mockClear();
+    const homedirSpy = vi
+      .spyOn(os, "homedir")
+      .mockReturnValue("/Users/steipete");
+    const realExists = fs.existsSync;
+    const legacyPath = path.join("/Users/steipete", "clawdis");
+    const existsSpy = vi.spyOn(fs, "existsSync").mockImplementation((value) => {
+      if (value === "/Users/steipete/clawdis" || value === legacyPath)
+        return true;
+      return realExists(value as never);
+    });
+
+    const { doctorCommand } = await import("./doctor.js");
+    const runtime = {
+      log: vi.fn(),
+      error: vi.fn(),
+      exit: vi.fn(),
+    };
+
+    await doctorCommand(runtime, { nonInteractive: true });
+
+    expect(
+      note.mock.calls.some(
+        ([message, title]) =>
+          title === "Legacy workspace" &&
+          typeof message === "string" &&
+          message.includes("clawdis"),
+      ),
+    ).toBe(true);
+
+    homedirSpy.mockRestore();
+    existsSpy.mockRestore();
+  });
   it("falls back to legacy sandbox image when missing", async () => {
     readConfigFileSnapshot.mockResolvedValue({
       path: "/tmp/clawdbot.json",
@@ -442,5 +611,234 @@ describe("doctor", () => {
 
     expect(docker.image).toBe("clawdis-sandbox-common:bookworm-slim");
     expect(runCommandWithTimeout).not.toHaveBeenCalled();
+  });
+
+  it("runs legacy state migrations in non-interactive mode without prompting", async () => {
+    readConfigFileSnapshot.mockResolvedValue({
+      path: "/tmp/clawdbot.json",
+      exists: true,
+      raw: "{}",
+      parsed: {},
+      valid: true,
+      config: {},
+      issues: [],
+      legacyIssues: [],
+    });
+
+    const { doctorCommand } = await import("./doctor.js");
+    const runtime = {
+      log: vi.fn(),
+      error: vi.fn(),
+      exit: vi.fn(),
+    };
+
+    const { detectLegacyStateMigrations, runLegacyStateMigrations } =
+      await import("./doctor-state-migrations.js");
+    detectLegacyStateMigrations.mockResolvedValueOnce({
+      targetAgentId: "main",
+      targetMainKey: "main",
+      stateDir: "/tmp/state",
+      oauthDir: "/tmp/oauth",
+      sessions: {
+        legacyDir: "/tmp/state/sessions",
+        legacyStorePath: "/tmp/state/sessions/sessions.json",
+        targetDir: "/tmp/state/agents/main/sessions",
+        targetStorePath: "/tmp/state/agents/main/sessions/sessions.json",
+        hasLegacy: true,
+      },
+      agentDir: {
+        legacyDir: "/tmp/state/agent",
+        targetDir: "/tmp/state/agents/main/agent",
+        hasLegacy: false,
+      },
+      whatsappAuth: {
+        legacyDir: "/tmp/oauth",
+        targetDir: "/tmp/oauth/whatsapp/default",
+        hasLegacy: false,
+      },
+      preview: ["- Legacy sessions detected"],
+    });
+    runLegacyStateMigrations.mockResolvedValueOnce({
+      changes: ["migrated"],
+      warnings: [],
+    });
+
+    confirm.mockClear();
+
+    await doctorCommand(runtime, { nonInteractive: true });
+
+    expect(runLegacyStateMigrations).toHaveBeenCalledTimes(1);
+    expect(confirm).not.toHaveBeenCalled();
+  });
+
+  it("runs legacy state migrations in yes mode without prompting", async () => {
+    readConfigFileSnapshot.mockResolvedValue({
+      path: "/tmp/clawdbot.json",
+      exists: true,
+      raw: "{}",
+      parsed: {},
+      valid: true,
+      config: {},
+      issues: [],
+      legacyIssues: [],
+    });
+
+    const { doctorCommand } = await import("./doctor.js");
+    const runtime = {
+      log: vi.fn(),
+      error: vi.fn(),
+      exit: vi.fn(),
+    };
+
+    const { detectLegacyStateMigrations, runLegacyStateMigrations } =
+      await import("./doctor-state-migrations.js");
+    detectLegacyStateMigrations.mockResolvedValueOnce({
+      targetAgentId: "main",
+      targetMainKey: "main",
+      stateDir: "/tmp/state",
+      oauthDir: "/tmp/oauth",
+      sessions: {
+        legacyDir: "/tmp/state/sessions",
+        legacyStorePath: "/tmp/state/sessions/sessions.json",
+        targetDir: "/tmp/state/agents/main/sessions",
+        targetStorePath: "/tmp/state/agents/main/sessions/sessions.json",
+        hasLegacy: true,
+      },
+      agentDir: {
+        legacyDir: "/tmp/state/agent",
+        targetDir: "/tmp/state/agents/main/agent",
+        hasLegacy: false,
+      },
+      whatsappAuth: {
+        legacyDir: "/tmp/oauth",
+        targetDir: "/tmp/oauth/whatsapp/default",
+        hasLegacy: false,
+      },
+      preview: ["- Legacy sessions detected"],
+    });
+    runLegacyStateMigrations.mockResolvedValueOnce({
+      changes: ["migrated"],
+      warnings: [],
+    });
+
+    runLegacyStateMigrations.mockClear();
+    confirm.mockClear();
+
+    await doctorCommand(runtime, { yes: true });
+
+    expect(runLegacyStateMigrations).toHaveBeenCalledTimes(1);
+    expect(confirm).not.toHaveBeenCalled();
+  });
+
+  it("skips gateway restarts in non-interactive mode", async () => {
+    readConfigFileSnapshot.mockResolvedValue({
+      path: "/tmp/clawdbot.json",
+      exists: true,
+      raw: "{}",
+      parsed: {},
+      valid: true,
+      config: {},
+      issues: [],
+      legacyIssues: [],
+    });
+
+    const { healthCommand } = await import("./health.js");
+    healthCommand.mockRejectedValueOnce(new Error("gateway closed"));
+
+    serviceIsLoaded.mockResolvedValueOnce(true);
+    serviceRestart.mockClear();
+    confirm.mockClear();
+
+    const { doctorCommand } = await import("./doctor.js");
+    const runtime = {
+      log: vi.fn(),
+      error: vi.fn(),
+      exit: vi.fn(),
+    };
+
+    await doctorCommand(runtime, { nonInteractive: true });
+
+    expect(serviceRestart).not.toHaveBeenCalled();
+    expect(confirm).not.toHaveBeenCalled();
+  });
+
+  it("migrates anthropic oauth config profile id when only email profile exists", async () => {
+    readConfigFileSnapshot.mockResolvedValue({
+      path: "/tmp/clawdbot.json",
+      exists: true,
+      raw: "{}",
+      parsed: {},
+      valid: true,
+      config: {
+        auth: {
+          profiles: {
+            "anthropic:default": { provider: "anthropic", mode: "oauth" },
+          },
+        },
+      },
+      issues: [],
+      legacyIssues: [],
+    });
+
+    ensureAuthProfileStore.mockReturnValueOnce({
+      version: 1,
+      profiles: {
+        "anthropic:me@example.com": {
+          type: "oauth",
+          provider: "anthropic",
+          access: "access",
+          refresh: "refresh",
+          expires: Date.now() + 60_000,
+          email: "me@example.com",
+        },
+      },
+    });
+
+    const { doctorCommand } = await import("./doctor.js");
+    await doctorCommand(
+      { log: vi.fn(), error: vi.fn(), exit: vi.fn() },
+      { yes: true },
+    );
+
+    const written = writeConfigFile.mock.calls.at(-1)?.[0] as Record<
+      string,
+      unknown
+    >;
+    const profiles = (written.auth as { profiles: Record<string, unknown> })
+      .profiles;
+    expect(profiles["anthropic:me@example.com"]).toBeTruthy();
+    expect(profiles["anthropic:default"]).toBeUndefined();
+  });
+
+  it("warns when the state directory is missing", async () => {
+    readConfigFileSnapshot.mockResolvedValue({
+      path: "/tmp/clawdbot.json",
+      exists: true,
+      raw: "{}",
+      parsed: {},
+      valid: true,
+      config: {},
+      issues: [],
+      legacyIssues: [],
+    });
+
+    const missingDir = fs.mkdtempSync(
+      path.join(os.tmpdir(), "clawdbot-missing-state-"),
+    );
+    fs.rmSync(missingDir, { recursive: true, force: true });
+    process.env.CLAWDBOT_STATE_DIR = missingDir;
+    note.mockClear();
+
+    const { doctorCommand } = await import("./doctor.js");
+    await doctorCommand(
+      { log: vi.fn(), error: vi.fn(), exit: vi.fn() },
+      { nonInteractive: true, workspaceSuggestions: false },
+    );
+
+    const stateNote = note.mock.calls.find(
+      (call) => call[1] === "State integrity",
+    );
+    expect(stateNote).toBeTruthy();
+    expect(String(stateNote?.[0])).toContain("CRITICAL");
   });
 });

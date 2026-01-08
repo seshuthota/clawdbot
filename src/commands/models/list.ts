@@ -513,7 +513,12 @@ export async function modelsListCommand(
   ensureFlagCompatibility(opts);
   const cfg = loadConfig();
   const authStore = ensureAuthProfileStore();
-  const providerFilter = opts.provider?.trim().toLowerCase();
+  const providerFilter = (() => {
+    const raw = opts.provider?.trim();
+    if (!raw) return undefined;
+    const parsed = parseModelRef(`${raw}/_`, DEFAULT_PROVIDER);
+    return parsed?.provider ?? raw.toLowerCase();
+  })();
 
   let models: Model<Api>[] = [];
   let availableKeys: Set<string> | undefined;
@@ -617,7 +622,8 @@ export async function modelsStatusCommand(
     typeof modelConfig === "string"
       ? modelConfig.trim()
       : (modelConfig?.primary?.trim() ?? "");
-  const defaultLabel = rawModel || `${resolved.provider}/${resolved.model}`;
+  const resolvedLabel = `${resolved.provider}/${resolved.model}`;
+  const defaultLabel = rawModel || resolvedLabel;
   const fallbacks =
     typeof modelConfig === "object" ? (modelConfig?.fallbacks ?? []) : [];
   const imageModel =
@@ -727,7 +733,7 @@ export async function modelsStatusCommand(
           configPath: CONFIG_PATH_CLAWDBOT,
           agentDir,
           defaultModel: defaultLabel,
-          resolvedDefault: `${resolved.provider}/${resolved.model}`,
+          resolvedDefault: resolvedLabel,
           fallbacks,
           imageModel: imageModel || null,
           imageFallbacks,
@@ -751,12 +757,16 @@ export async function modelsStatusCommand(
   }
 
   if (opts.plain) {
-    runtime.log(defaultLabel);
+    runtime.log(resolvedLabel);
     return;
   }
 
   const rich = isRich(opts);
   const label = (value: string) => colorize(rich, chalk.cyan, value.padEnd(14));
+  const displayDefault =
+    rawModel && rawModel !== resolvedLabel
+      ? `${resolvedLabel} (from ${rawModel})`
+      : resolvedLabel;
 
   runtime.log(
     `${label("Config")}${colorize(rich, chalk.gray, ":")} ${colorize(rich, chalk.white, CONFIG_PATH_CLAWDBOT)}`,
@@ -772,7 +782,7 @@ export async function modelsStatusCommand(
     `${label("Default")}${colorize(rich, chalk.gray, ":")} ${colorize(
       rich,
       chalk.green,
-      defaultLabel,
+      displayDefault,
     )}`,
   );
   runtime.log(
@@ -898,18 +908,28 @@ export async function modelsStatusCommand(
       bits.push(
         formatKeyValue(
           "env",
-          `${entry.env.value} (${entry.env.source})`,
+          `${entry.env.value}${separator}${formatKeyValue(
+            "source",
+            entry.env.source,
+            rich,
+          )}`,
           rich,
-          chalk.gray,
         ),
       );
     }
     if (entry.modelsJson) {
       bits.push(
-        formatKeyValue("models.json", entry.modelsJson.value, rich, chalk.gray),
+        formatKeyValue(
+          "models.json",
+          `${entry.modelsJson.value}${separator}${formatKeyValue(
+            "source",
+            entry.modelsJson.source,
+            rich,
+          )}`,
+          rich,
+        ),
       );
     }
-    const providerLabel = colorize(rich, chalk.cyan, entry.provider);
-    runtime.log(`${providerLabel}: ${bits.join(separator)}`);
+    runtime.log(`- ${chalk.bold(entry.provider)} ${bits.join(separator)}`);
   }
 }
