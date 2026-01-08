@@ -9,7 +9,7 @@ export function createSlackTool(): AnyAgentTool {
     name: "slack",
     description: "Manage Slack messages, reactions, and pins.",
     parameters: SlackToolSchema,
-    execute: async (_toolCallId, args) => {
+    execute: async (_toolCallId, args: any) => {
       const params = args as Record<string, unknown>;
       const cfg = loadConfig();
       return await handleSlackAction(params, cfg);

@@ -77,14 +77,15 @@ It does not define which tools exist; Clawdbot provides built-in tools internall
 
 ## Examples
 
-### imsg
-- Send an iMessage/SMS: describe who/what, confirm before sending.
-- Prefer short messages; avoid sending secrets.
+### notify-send (Linux) / osascript (Mac)
+- Send desktop notifications.
+- Precise about urgency and timeout.
 
-### sag
+### spd-say (Linux) / say (Mac)
 - Text-to-speech: specify voice, target speaker/room, and whether to stream.
 
-Add whatever else you want the assistant to know about your local toolchain.
+### gemini
+- Use background execution for long prompts: \`gemini -p "Prompt" > out.log 2>&1 &\`
 `;
 
 const DEFAULT_HEARTBEAT_TEMPLATE = `# HEARTBEAT.md
@@ -316,35 +317,35 @@ export async function loadWorkspaceBootstrapFiles(
     name: WorkspaceBootstrapFileName;
     filePath: string;
   }> = [
-    {
-      name: DEFAULT_AGENTS_FILENAME,
-      filePath: path.join(resolvedDir, DEFAULT_AGENTS_FILENAME),
-    },
-    {
-      name: DEFAULT_SOUL_FILENAME,
-      filePath: path.join(resolvedDir, DEFAULT_SOUL_FILENAME),
-    },
-    {
-      name: DEFAULT_TOOLS_FILENAME,
-      filePath: path.join(resolvedDir, DEFAULT_TOOLS_FILENAME),
-    },
-    {
-      name: DEFAULT_IDENTITY_FILENAME,
-      filePath: path.join(resolvedDir, DEFAULT_IDENTITY_FILENAME),
-    },
-    {
-      name: DEFAULT_USER_FILENAME,
-      filePath: path.join(resolvedDir, DEFAULT_USER_FILENAME),
-    },
-    {
-      name: DEFAULT_HEARTBEAT_FILENAME,
-      filePath: path.join(resolvedDir, DEFAULT_HEARTBEAT_FILENAME),
-    },
-    {
-      name: DEFAULT_BOOTSTRAP_FILENAME,
-      filePath: path.join(resolvedDir, DEFAULT_BOOTSTRAP_FILENAME),
-    },
-  ];
+      {
+        name: DEFAULT_AGENTS_FILENAME,
+        filePath: path.join(resolvedDir, DEFAULT_AGENTS_FILENAME),
+      },
+      {
+        name: DEFAULT_SOUL_FILENAME,
+        filePath: path.join(resolvedDir, DEFAULT_SOUL_FILENAME),
+      },
+      {
+        name: DEFAULT_TOOLS_FILENAME,
+        filePath: path.join(resolvedDir, DEFAULT_TOOLS_FILENAME),
+      },
+      {
+        name: DEFAULT_IDENTITY_FILENAME,
+        filePath: path.join(resolvedDir, DEFAULT_IDENTITY_FILENAME),
+      },
+      {
+        name: DEFAULT_USER_FILENAME,
+        filePath: path.join(resolvedDir, DEFAULT_USER_FILENAME),
+      },
+      {
+        name: DEFAULT_HEARTBEAT_FILENAME,
+        filePath: path.join(resolvedDir, DEFAULT_HEARTBEAT_FILENAME),
+      },
+      {
+        name: DEFAULT_BOOTSTRAP_FILENAME,
+        filePath: path.join(resolvedDir, DEFAULT_BOOTSTRAP_FILENAME),
+      },
+    ];
 
   const result: WorkspaceBootstrapFile[] = [];
   for (const entry of entries) {

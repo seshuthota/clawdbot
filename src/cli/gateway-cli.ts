@@ -313,8 +313,8 @@ export function registerGatewayCli(program: Command) {
       const tailscaleRaw = opts.tailscale ? String(opts.tailscale) : undefined;
       const tailscaleMode =
         tailscaleRaw === "off" ||
-        tailscaleRaw === "serve" ||
-        tailscaleRaw === "funnel"
+          tailscaleRaw === "serve" ||
+          tailscaleRaw === "funnel"
           ? tailscaleRaw
           : null;
       if (tailscaleRaw && !tailscaleMode) {
@@ -327,9 +327,9 @@ export function registerGatewayCli(program: Command) {
       const bindRaw = String(opts.bind ?? cfg.gateway?.bind ?? "loopback");
       const bind =
         bindRaw === "loopback" ||
-        bindRaw === "tailnet" ||
-        bindRaw === "lan" ||
-        bindRaw === "auto"
+          bindRaw === "tailnet" ||
+          bindRaw === "lan" ||
+          bindRaw === "auto"
           ? bindRaw
           : null;
       if (!bind) {
@@ -349,18 +349,18 @@ export function registerGatewayCli(program: Command) {
               auth:
                 authMode || opts.password || authModeRaw
                   ? {
-                      mode: authMode ?? undefined,
-                      password: opts.password
-                        ? String(opts.password)
-                        : undefined,
-                    }
+                    mode: authMode ?? undefined,
+                    password: opts.password
+                      ? String(opts.password)
+                      : undefined,
+                  }
                   : undefined,
               tailscale:
                 tailscaleMode || opts.tailscaleResetOnExit
                   ? {
-                      mode: tailscaleMode ?? undefined,
-                      resetOnExit: Boolean(opts.tailscaleResetOnExit),
-                    }
+                    mode: tailscaleMode ?? undefined,
+                    resetOnExit: Boolean(opts.tailscaleResetOnExit),
+                  }
                   : undefined,
             }),
         });
@@ -508,8 +508,8 @@ export function registerGatewayCli(program: Command) {
       const tailscaleRaw = opts.tailscale ? String(opts.tailscale) : undefined;
       const tailscaleMode =
         tailscaleRaw === "off" ||
-        tailscaleRaw === "serve" ||
-        tailscaleRaw === "funnel"
+          tailscaleRaw === "serve" ||
+          tailscaleRaw === "funnel"
           ? tailscaleRaw
           : null;
       if (tailscaleRaw && !tailscaleMode) {
@@ -537,9 +537,9 @@ export function registerGatewayCli(program: Command) {
       const bindRaw = String(opts.bind ?? cfg.gateway?.bind ?? "loopback");
       const bind =
         bindRaw === "loopback" ||
-        bindRaw === "tailnet" ||
-        bindRaw === "lan" ||
-        bindRaw === "auto"
+          bindRaw === "tailnet" ||
+          bindRaw === "lan" ||
+          bindRaw === "auto"
           ? bindRaw
           : null;
       if (!bind) {
@@ -559,18 +559,18 @@ export function registerGatewayCli(program: Command) {
               auth:
                 authMode || opts.password || authModeRaw
                   ? {
-                      mode: authMode ?? undefined,
-                      password: opts.password
-                        ? String(opts.password)
-                        : undefined,
-                    }
+                    mode: authMode ?? undefined,
+                    password: opts.password
+                      ? String(opts.password)
+                      : undefined,
+                  }
                   : undefined,
               tailscale:
                 tailscaleMode || opts.tailscaleResetOnExit
                   ? {
-                      mode: tailscaleMode ?? undefined,
-                      resetOnExit: Boolean(opts.tailscaleResetOnExit),
-                    }
+                    mode: tailscaleMode ?? undefined,
+                    resetOnExit: Boolean(opts.tailscaleResetOnExit),
+                  }
                   : undefined,
             }),
         });

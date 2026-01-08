@@ -33,7 +33,8 @@ process action:write sessionId:XXX data:"y"
 process action:kill sessionId:XXX
 ```
 
-**Why workdir matters:** Agent wakes up in a focused directory, doesn't wander off reading unrelated files (like your soul.md 😅).
+**Why workdir matters:** Agent wakes up in a focused directory.
+**Why background matters:** The main agent loop has a short timeout. **ALWAYS** use `background:true` for coding tasks to prevent the agent from getting killed mid-generation.
 
 ---
 

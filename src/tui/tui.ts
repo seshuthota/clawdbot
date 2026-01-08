@@ -398,7 +398,7 @@ export async function runTui(opts: TuiOptions) {
         description: model.name && model.name !== model.id ? model.name : "",
       }));
       const selector = createSelectList(items, 9);
-      selector.onSelect = (item) => {
+      selector.onSelect = (item: any) => {
         void (async () => {
           try {
             await client.patchSession({
@@ -440,7 +440,7 @@ export async function runTui(opts: TuiOptions) {
           : "",
       }));
       const selector = createSelectList(items, 9);
-      selector.onSelect = (item) => {
+      selector.onSelect = (item: any) => {
         void (async () => {
           closeOverlay();
           await setSession(item.value);
@@ -680,7 +680,7 @@ export async function runTui(opts: TuiOptions) {
   editor.setAutocompleteProvider(
     new CombinedAutocompleteProvider(getSlashCommands(), process.cwd()),
   );
-  editor.onSubmit = (text) => {
+  editor.onSubmit = (text: string) => {
     const value = text.trim();
     editor.setText("");
     if (!value) return;

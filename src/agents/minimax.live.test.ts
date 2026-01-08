@@ -11,16 +11,16 @@ const describeLive = LIVE && MINIMAX_KEY ? describe : describe.skip;
 
 describeLive("minimax live", () => {
   it("returns assistant text", async () => {
-    const model: Model<"openai-completions"> = {
+    const model: Model<"openai-responses"> = {
       id: MINIMAX_MODEL,
       name: `MiniMax ${MINIMAX_MODEL}`,
-      api: "openai-completions",
+      api: "openai-responses",
       provider: "minimax",
       baseUrl: MINIMAX_BASE_URL,
       reasoning: false,
       input: ["text"],
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-      contextWindow: 200000,
+      contextWindow: 128000,
       maxTokens: 8192,
     };
     const res = await completeSimple(
@@ -36,6 +36,7 @@ describeLive("minimax live", () => {
       },
       { apiKey: MINIMAX_KEY, maxTokens: 64 },
     );
+    console.log("DEBUG: MiniMax Response", JSON.stringify(res, null, 2));
     const text = res.content
       .filter((block) => block.type === "text")
       .map((block) => block.text.trim())

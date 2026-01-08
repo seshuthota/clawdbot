@@ -400,6 +400,14 @@ export async function compactEmbeddedPiSession(params: {
           cfg: params.config,
         });
         authStorage.setRuntimeApiKey(model.provider, apiKeyInfo.apiKey);
+
+        // Fix for MiniMax: Requires Bearer token in Authorization header
+        if (model.provider === "minimax" || modelId.includes("MiniMax")) {
+          // @ts-ignore - headers might not be strictly typed on the runtime model interface
+          if (!model.headers) model.headers = {};
+          // @ts-ignore
+          model.headers["Authorization"] = `Bearer ${apiKeyInfo.apiKey}`;
+        }
       } catch (err) {
         return {
           ok: false,
@@ -437,13 +445,13 @@ export async function compactEmbeddedPiSession(params: {
         });
         restoreSkillEnv = params.skillsSnapshot
           ? applySkillEnvOverridesFromSnapshot({
-              snapshot: params.skillsSnapshot,
-              config: params.config,
-            })
+            snapshot: params.skillsSnapshot,
+            config: params.config,
+          })
           : applySkillEnvOverrides({
-              skills: skillEntries ?? [],
-              config: params.config,
-            });
+            skills: skillEntries ?? [],
+            config: params.config,
+          });
 
         const bootstrapFiles =
           await loadWorkspaceBootstrapFiles(resolvedWorkspace);
@@ -664,6 +672,14 @@ export async function runEmbeddedPiAgent(params: {
       const applyApiKeyInfo = async (candidate?: string): Promise<void> => {
         apiKeyInfo = await resolveApiKeyForCandidate(candidate);
         authStorage.setRuntimeApiKey(model.provider, apiKeyInfo.apiKey);
+
+        // Fix for MiniMax: Requires Bearer token in Authorization header
+        if (model.provider === "minimax" || modelId.includes("MiniMax")) {
+          // @ts-ignore
+          if (!model.headers) model.headers = {};
+          // @ts-ignore
+          model.headers["Authorization"] = `Bearer ${apiKeyInfo.apiKey}`;
+        }
         lastProfileId = apiKeyInfo.profileId;
       };
 
@@ -731,13 +747,13 @@ export async function runEmbeddedPiAgent(params: {
           });
           restoreSkillEnv = params.skillsSnapshot
             ? applySkillEnvOverridesFromSnapshot({
-                snapshot: params.skillsSnapshot,
-                config: params.config,
-              })
+              snapshot: params.skillsSnapshot,
+              config: params.config,
+            })
             : applySkillEnvOverrides({
-                skills: skillEntries ?? [],
-                config: params.config,
-              });
+              skills: skillEntries ?? [],
+              config: params.config,
+            });
 
           const bootstrapFiles =
             await loadWorkspaceBootstrapFiles(resolvedWorkspace);

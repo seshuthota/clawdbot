@@ -56,4 +56,16 @@ export class CustomEditor extends Editor {
     }
     super.handleInput(data);
   }
+  setText(text: string): void {
+    super.setText(text);
+  }
+
+  getText(): string {
+    return super.getText();
+  }
+
+
+  setAutocompleteProvider(provider: any): void {
+    super.setAutocompleteProvider(provider);
+  }
 }

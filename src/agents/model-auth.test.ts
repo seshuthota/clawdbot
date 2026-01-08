@@ -163,4 +163,22 @@ describe("getApiKeyForModel", () => {
       await fs.rm(tempDir, { recursive: true, force: true });
     }
   });
+  it("resolves MINIMAX_API_KEY from env", async () => {
+    const previousMinimaxKey = process.env.MINIMAX_API_KEY;
+    try {
+      process.env.MINIMAX_API_KEY = "sk-minimax-test-key";
+      vi.resetModules();
+      const { resolveApiKeyForProvider } = await import("./model-auth.js");
+
+      const result = await resolveApiKeyForProvider({ provider: "minimax" });
+      expect(result.apiKey).toBe("sk-minimax-test-key");
+      expect(result.source).toContain("env: MINIMAX_API_KEY");
+    } finally {
+      if (previousMinimaxKey === undefined) {
+        delete process.env.MINIMAX_API_KEY;
+      } else {
+        process.env.MINIMAX_API_KEY = previousMinimaxKey;
+      }
+    }
+  });
 });

@@ -271,7 +271,7 @@ export async function handleCommands(params: {
       !command.isWhatsAppProvider || activationOwnerList.length === 0
         ? command.isAuthorizedSender
         : Boolean(activationSenderE164) &&
-          activationOwnerList.includes(activationSenderE164);
+        activationOwnerList.includes(activationSenderE164);
 
     if (
       !command.isAuthorizedSender ||

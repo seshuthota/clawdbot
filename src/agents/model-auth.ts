@@ -74,7 +74,7 @@ export async function resolveApiKeyForProvider(params: {
           source: `profile:${candidate}`,
         };
       }
-    } catch {}
+    } catch { }
   }
 
   const envResolved = resolveEnvApiKey(provider);
@@ -137,6 +137,7 @@ export function resolveEnvApiKey(provider: string): EnvApiKeyResult | null {
     openrouter: "OPENROUTER_API_KEY",
     zai: "ZAI_API_KEY",
     mistral: "MISTRAL_API_KEY",
+    minimax: "MINIMAX_API_KEY",
   };
   const envVar = envMap[provider];
   if (!envVar) return null;

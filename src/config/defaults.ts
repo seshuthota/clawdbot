@@ -164,3 +164,19 @@ export function applyLoggingDefaults(cfg: ClawdbotConfig): ClawdbotConfig {
 export function resetSessionDefaultsWarningForTests() {
   defaultWarnState = { warned: false };
 }
+
+import { MINIMAX_PROVIDER_CONFIG } from "../providers/minimax.js";
+
+export function applyMinimaxDefaults(cfg: ClawdbotConfig): ClawdbotConfig {
+  const providers = { ...cfg.models?.providers };
+  if (!providers.minimax) {
+    providers.minimax = MINIMAX_PROVIDER_CONFIG;
+  }
+  return {
+    ...cfg,
+    models: {
+      ...cfg.models,
+      providers,
+    },
+  };
+}

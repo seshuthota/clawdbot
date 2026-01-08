@@ -15,6 +15,7 @@ import {
   applyModelDefaults,
   applySessionDefaults,
   applyTalkApiKey,
+  applyMinimaxDefaults,
 } from "./defaults.js";
 import { findLegacyConfigIssues } from "./legacy.js";
 import {
@@ -115,11 +116,13 @@ export function createConfigIO(overrides: ConfigIoDeps = {}) {
         }
         return {};
       }
-      const cfg = applyModelDefaults(
-        applySessionDefaults(
-          applyLoggingDefaults(
-            applyMessageDefaults(
-              applyIdentityDefaults(validated.data as ClawdbotConfig),
+      const cfg = applyMinimaxDefaults(
+        applyModelDefaults(
+          applySessionDefaults(
+            applyLoggingDefaults(
+              applyMessageDefaults(
+                applyIdentityDefaults(validated.data as ClawdbotConfig),
+              ),
             ),
           ),
         ),

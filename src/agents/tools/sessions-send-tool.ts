@@ -45,7 +45,7 @@ export function createSessionsSendTool(opts?: {
     name: "sessions_send",
     description: "Send a message into another session.",
     parameters: SessionsSendToolSchema,
-    execute: async (_toolCallId, args) => {
+    execute: async (_toolCallId, args: any) => {
       const params = args as Record<string, unknown>;
       const sessionKey = readStringParam(params, "sessionKey", {
         required: true,
@@ -113,7 +113,7 @@ export function createSessionsSendTool(opts?: {
       }
       const timeoutSeconds =
         typeof params.timeoutSeconds === "number" &&
-        Number.isFinite(params.timeoutSeconds)
+          Number.isFinite(params.timeoutSeconds)
           ? Math.max(0, Math.floor(params.timeoutSeconds))
           : 30;
       const timeoutMs = timeoutSeconds * 1000;
