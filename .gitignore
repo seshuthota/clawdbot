@@ -50,3 +50,14 @@ apps/ios/*.dSYM.zip
 # provisioning profiles (local)
 apps/ios/*.mobileprovision
 .env
+
+# Local improvements / logs
+*.log
+*.txt
+.env.backup
+.vscode/
+memory/
+memory.md
+test.html
+temp/
+latest.json
