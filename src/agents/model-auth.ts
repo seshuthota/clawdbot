@@ -139,7 +139,6 @@ export function resolveEnvApiKey(provider: string): EnvApiKeyResult | null {
     minimax: "MINIMAX_API_KEY",
     zai: "ZAI_API_KEY",
     mistral: "MISTRAL_API_KEY",
-    minimax: "MINIMAX_API_KEY",
   };
   const envVar = envMap[provider];
   if (!envVar) return null;

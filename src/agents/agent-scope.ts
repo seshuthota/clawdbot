@@ -25,6 +25,7 @@ type ResolvedAgentConfig = {
   subagents?: AgentEntry["subagents"];
   sandbox?: AgentEntry["sandbox"];
   tools?: AgentEntry["tools"];
+  contextTokens?: number;
 };
 
 let defaultAgentWarned = false;
@@ -87,6 +88,8 @@ export function resolveAgentConfig(
         : undefined,
     sandbox: entry.sandbox,
     tools: entry.tools,
+    contextTokens:
+      typeof entry.contextTokens === "number" ? entry.contextTokens : undefined,
   };
 }
 

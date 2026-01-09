@@ -138,8 +138,8 @@ const resolveAuthLabel = async (
       if (profile.type === "token") {
         const exp =
           typeof profile.expires === "number" &&
-          Number.isFinite(profile.expires) &&
-          profile.expires > 0
+            Number.isFinite(profile.expires) &&
+            profile.expires > 0
             ? profile.expires <= now
               ? " expired"
               : ` exp ${formatUntil(profile.expires)}`
@@ -153,8 +153,8 @@ const resolveAuthLabel = async (
       const label = display === profileId ? profileId : display;
       const exp =
         typeof profile.expires === "number" &&
-        Number.isFinite(profile.expires) &&
-        profile.expires > 0
+          Number.isFinite(profile.expires) &&
+          profile.expires > 0
           ? profile.expires <= now
             ? " expired"
             : ` exp ${formatUntil(profile.expires)}`
@@ -337,13 +337,13 @@ export function parseInlineDirectives(
     rawLevel: rawElevatedLevel,
     hasDirective: hasElevatedDirective,
   } = options?.disableElevated
-    ? {
+      ? {
         cleaned: reasoningCleaned,
         elevatedLevel: undefined,
         rawLevel: undefined,
         hasDirective: false,
       }
-    : extractElevatedDirective(reasoningCleaned);
+      : extractElevatedDirective(reasoningCleaned);
   const { cleaned: statusCleaned, hasDirective: hasStatusDirective } =
     extractStatusDirective(elevatedCleaned);
   const {
@@ -478,6 +478,7 @@ export async function handleDirectiveOnly(params: {
     ? resolveAgentIdFromSessionKey(params.sessionKey)
     : resolveDefaultAgentId(params.cfg);
   const agentDir = resolveAgentDir(params.cfg, activeAgentId);
+  const agentCfg = resolveAgentConfig(params.cfg, activeAgentId);
   const runtimeIsSandboxed = (() => {
     const sessionKey = params.sessionKey?.trim();
     if (!sessionKey) return false;
@@ -803,16 +804,16 @@ export async function handleDirectiveOnly(params: {
     }
     modelSelection = resolved.selection;
     if (modelSelection) {
-        if (directives.rawModelProfile) {
-          const profileResolved = resolveProfileOverride({
-            rawProfile: directives.rawModelProfile,
-            provider: modelSelection.provider,
-            cfg: params.cfg,
-            agentDir,
-          });
-          if (profileResolved.error) {
-            return { text: profileResolved.error };
-          }
+      if (directives.rawModelProfile) {
+        const profileResolved = resolveProfileOverride({
+          rawProfile: directives.rawModelProfile,
+          provider: modelSelection.provider,
+          cfg: params.cfg,
+          agentDir,
+        });
+        if (profileResolved.error) {
+          return { text: profileResolved.error };
+        }
         profileOverride = profileResolved.profileId;
       }
       const nextLabel = `${modelSelection.provider}/${modelSelection.model}`;
@@ -1053,7 +1054,12 @@ export async function persistInlineDirectives(params: {
               rawProfile: directives.rawModelProfile,
               provider: resolved.ref.provider,
               cfg,
-              agentDir,
+              agentDir: resolveAgentDir(
+                params.cfg,
+                params.sessionKey
+                  ? resolveAgentIdFromSessionKey(params.sessionKey)
+                  : resolveDefaultAgentId(params.cfg),
+              ),
             });
             if (profileResolved.error) {
               throw new Error(profileResolved.error);
@@ -1110,7 +1116,12 @@ export async function persistInlineDirectives(params: {
     provider,
     model,
     contextTokens:
-      agentCfg?.contextTokens ??
+      resolveAgentConfig(
+        params.cfg,
+        params.sessionKey
+          ? resolveAgentIdFromSessionKey(params.sessionKey)
+          : resolveDefaultAgentId(params.cfg),
+      )?.contextTokens ??
       lookupContextTokens(model) ??
       DEFAULT_CONTEXT_TOKENS,
   };
@@ -1130,20 +1141,20 @@ export function resolveDefaultModel(params: {
   const cfg =
     agentModelOverride && agentModelOverride.length > 0
       ? {
-          ...params.cfg,
-          agents: {
-            ...params.cfg.agents,
-            defaults: {
-              ...params.cfg.agents?.defaults,
-              model: {
-                ...(typeof params.cfg.agents?.defaults?.model === "object"
-                  ? params.cfg.agents.defaults.model
-                  : undefined),
-                primary: agentModelOverride,
-              },
+        ...params.cfg,
+        agents: {
+          ...params.cfg.agents,
+          defaults: {
+            ...params.cfg.agents?.defaults,
+            model: {
+              ...(typeof params.cfg.agents?.defaults?.model === "object"
+                ? params.cfg.agents.defaults.model
+                : undefined),
+              primary: agentModelOverride,
             },
           },
-        }
+        },
+      }
       : params.cfg;
   const mainModel = resolveConfiguredModelRef({
     cfg,

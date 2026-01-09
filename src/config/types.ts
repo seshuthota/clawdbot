@@ -51,13 +51,13 @@ export type LoggingConfig = {
   level?: "silent" | "fatal" | "error" | "warn" | "info" | "debug" | "trace";
   file?: string;
   consoleLevel?:
-    | "silent"
-    | "fatal"
-    | "error"
-    | "warn"
-    | "info"
-    | "debug"
-    | "trace";
+  | "silent"
+  | "fatal"
+  | "error"
+  | "warn"
+  | "info"
+  | "debug"
+  | "trace";
   consoleStyle?: "pretty" | "compact" | "json";
   /** Redact sensitive tokens in tool summaries. Default: "tools". */
   redactSensitive?: "off" | "tools";
@@ -215,14 +215,14 @@ export type HookMappingConfig = {
   textTemplate?: string;
   deliver?: boolean;
   provider?:
-    | "last"
-    | "whatsapp"
-    | "telegram"
-    | "discord"
-    | "slack"
-    | "signal"
-    | "imessage"
-    | "msteams";
+  | "last"
+  | "whatsapp"
+  | "telegram"
+  | "discord"
+  | "slack"
+  | "signal"
+  | "imessage"
+  | "msteams";
   to?: string;
   /** Override model for this hook (provider/model or alias). */
   model?: string;
@@ -864,6 +864,7 @@ export type AgentConfig = {
     prune?: SandboxPruneSettings;
   };
   tools?: AgentToolsConfig;
+  contextTokens?: number;
 };
 
 export type AgentsConfig = {
@@ -1204,15 +1205,15 @@ export type AgentDefaultsConfig = {
     model?: string;
     /** Delivery target (last|whatsapp|telegram|discord|signal|imessage|none). */
     target?:
-      | "last"
-      | "whatsapp"
-      | "telegram"
-      | "discord"
-      | "slack"
-      | "signal"
-      | "imessage"
-      | "msteams"
-      | "none";
+    | "last"
+    | "whatsapp"
+    | "telegram"
+    | "discord"
+    | "slack"
+    | "signal"
+    | "imessage"
+    | "msteams"
+    | "none";
     /** Optional delivery override (E.164 for WhatsApp, chat id for Telegram). */
     to?: string;
     /** Override the heartbeat prompt body (default: "Read HEARTBEAT.md if exists. Consider outstanding tasks. Checkup sometimes on your human during (user local) day time."). */
@@ -1274,10 +1275,10 @@ export type ClawdbotConfig = {
     vars?: Record<string, string>;
     /** Sugar: allow env vars directly under env (string values only). */
     [key: string]:
-      | string
-      | Record<string, string>
-      | { enabled?: boolean; timeoutMs?: number }
-      | undefined;
+    | string
+    | Record<string, string>
+    | { enabled?: boolean; timeoutMs?: number }
+    | undefined;
   };
   wizard?: {
     lastRunAt?: string;
