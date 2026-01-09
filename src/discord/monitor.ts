@@ -17,6 +17,7 @@ import { GatewayIntents, GatewayPlugin } from "@buape/carbon/gateway";
 import type { APIAttachment } from "discord-api-types/v10";
 import { ApplicationCommandOptionType, Routes } from "discord-api-types/v10";
 
+import { resolveAckReaction } from "../agents/identity.js";
 import { resolveTextChunkLimit } from "../auto-reply/chunk.js";
 import { hasControlCommand } from "../auto-reply/command-detection.js";
 import {
@@ -44,10 +45,12 @@ import { loadConfig } from "../config/config.js";
 import { resolveStorePath, updateLastRoute } from "../config/sessions.js";
 import { danger, logVerbose, shouldLogVerbose } from "../globals.js";
 import { formatDurationSeconds } from "../infra/format-duration.js";
+import { recordProviderActivity } from "../infra/provider-activity.js";
 import { enqueueSystemEvent } from "../infra/system-events.js";
 import { getChildLogger } from "../logging.js";
 import { detectMime } from "../media/mime.js";
 import { saveMediaBuffer } from "../media/store.js";
+import { buildPairingReply } from "../pairing/pairing-messages.js";
 import {
   readProviderAllowFromStore,
   upsertProviderPairingRequest,
@@ -61,6 +64,10 @@ import type { RuntimeEnv } from "../runtime.js";
 import { loadWebMedia } from "../web/media.js";
 import { resolveDiscordAccount } from "./accounts.js";
 import { chunkDiscordText } from "./chunk.js";
+import {
+  getDiscordGatewayEmitter,
+  waitForDiscordGatewayStop,
+} from "./monitor.gateway.js";
 import { fetchDiscordApplicationId } from "./probe.js";
 import { reactMessageDiscord, sendMessageDiscord } from "./send.js";
 import { normalizeDiscordToken } from "./token.js";
@@ -319,7 +326,6 @@ export async function monitorDiscordProvider(opts: MonitorDiscordOpts = {}) {
       publicKey: "a",
       token,
       autoDeploy: nativeEnabled,
-      eventQueue: { logSlowListeners: false },
     },
     {
       commands,
@@ -327,6 +333,9 @@ export async function monitorDiscordProvider(opts: MonitorDiscordOpts = {}) {
     },
     [
       new GatewayPlugin({
+        reconnect: {
+          maxAttempts: Number.POSITIVE_INFINITY,
+        },
         intents:
           GatewayIntents.Guilds |
           GatewayIntents.GuildMessages |
@@ -403,19 +412,37 @@ export async function monitorDiscordProvider(opts: MonitorDiscordOpts = {}) {
 
   runtime.log?.(`logged in to discord${botUserId ? ` as ${botUserId}` : ""}`);
 
-  await new Promise<void>((resolve) => {
-    const onAbort = async () => {
-      try {
-        const gateway = client.getPlugin<GatewayPlugin>("gateway");
-        gateway?.disconnect();
-      } finally {
-        resolve();
-      }
-    };
-    opts.abortSignal?.addEventListener("abort", () => {
-      void onAbort();
+  const gateway = client.getPlugin<GatewayPlugin>("gateway");
+  const gatewayEmitter = getDiscordGatewayEmitter(gateway);
+  const onGatewayWarning = (warning: unknown) => {
+    logVerbose(`discord gateway warning: ${String(warning)}`);
+  };
+  if (shouldLogVerbose()) {
+    gatewayEmitter?.on("warning", onGatewayWarning);
+  }
+  try {
+    await waitForDiscordGatewayStop({
+      gateway: gateway
+        ? {
+            emitter: gatewayEmitter,
+            disconnect: () => gateway.disconnect(),
+          }
+        : undefined,
+      abortSignal: opts.abortSignal,
+      onGatewayError: (err) => {
+        runtime.error?.(danger(`discord gateway error: ${String(err)}`));
+      },
+      shouldStopOnError: (err) => {
+        const message = String(err);
+        return (
+          message.includes("Max reconnect attempts") ||
+          message.includes("Fatal Gateway error")
+        );
+      },
     });
-  });
+  } finally {
+    gatewayEmitter?.removeListener("warning", onGatewayWarning);
+  }
 }
 
 async function clearDiscordNativeCommands(params: {
@@ -475,8 +502,6 @@ export function createDiscordMessageHandler(params: {
     guildEntries,
   } = params;
   const logger = getChildLogger({ module: "discord-auto-reply" });
-  const mentionRegexes = buildMentionRegexes(cfg);
-  const ackReaction = (cfg.messages?.ackReaction ?? "").trim();
   const ackReactionScope = cfg.messages?.ackReactionScope ?? "group-mentions";
   const groupPolicy = discordConfig?.groupPolicy ?? "open";
 
@@ -544,14 +569,11 @@ export function createDiscordMessageHandler(params: {
                 try {
                   await sendMessageDiscord(
                     `user:${author.id}`,
-                    [
-                      "Clawdbot: access not configured.",
-                      "",
-                      `Pairing code: ${code}`,
-                      "",
-                      "Ask the bot owner to approve with:",
-                      "clawdbot pairing approve --provider discord <code>",
-                    ].join("\n"),
+                    buildPairingReply({
+                      provider: "discord",
+                      idLine: `Your Discord user id: ${author.id}`,
+                      code,
+                    }),
                     { token, rest: client.rest, accountId },
                   );
                 } catch (err) {
@@ -572,6 +594,22 @@ export function createDiscordMessageHandler(params: {
       }
       const botId = botUserId;
       const baseText = resolveDiscordMessageText(message);
+      recordProviderActivity({
+        provider: "discord",
+        accountId,
+        direction: "inbound",
+      });
+      const route = resolveAgentRoute({
+        cfg,
+        provider: "discord",
+        accountId,
+        guildId: data.guild_id ?? undefined,
+        peer: {
+          kind: isDirectMessage ? "dm" : isGroupDm ? "group" : "channel",
+          id: isDirectMessage ? author.id : message.channelId,
+        },
+      });
+      const mentionRegexes = buildMentionRegexes(cfg, route.agentId);
       const wasMentioned =
         !isDirectMessage &&
         (Boolean(
@@ -643,16 +681,6 @@ export function createDiscordMessageHandler(params: {
         guildInfo?.slug ||
         (data.guild?.name ? normalizeDiscordSlug(data.guild.name) : "");
 
-      const route = resolveAgentRoute({
-        cfg,
-        provider: "discord",
-        accountId,
-        guildId: data.guild_id ?? undefined,
-        peer: {
-          kind: isDirectMessage ? "dm" : isGroupDm ? "group" : "channel",
-          id: isDirectMessage ? author.id : message.channelId,
-        },
-      });
       const baseSessionKey = route.sessionKey;
       const channelConfig = isGuildMessage
         ? resolveDiscordChannelConfig({
@@ -757,6 +785,7 @@ export function createDiscordMessageHandler(params: {
         !hasAnyMention &&
         commandAuthorized &&
         hasControlCommand(baseText);
+      const effectiveWasMentioned = wasMentioned || shouldBypassMention;
       const canDetectMention = Boolean(botId) || mentionRegexes.length > 0;
       if (isGuildMessage && shouldRequireMention) {
         if (botId && !wasMentioned && !shouldBypassMention) {
@@ -813,6 +842,7 @@ export function createDiscordMessageHandler(params: {
         logVerbose(`discord: drop message ${message.id} (empty content)`);
         return;
       }
+      const ackReaction = resolveAckReaction(cfg, route.agentId);
       const shouldAckReaction = () => {
         if (!ackReaction) return false;
         if (ackReactionScope === "all") return true;
@@ -953,7 +983,7 @@ export function createDiscordMessageHandler(params: {
           : undefined,
         Provider: "discord" as const,
         Surface: "discord" as const,
-        WasMentioned: wasMentioned,
+        WasMentioned: effectiveWasMentioned,
         MessageSid: message.id,
         ParentSessionKey: threadKeys.parentSessionKey,
         ThreadStarterBody: threadStarterBody,
@@ -1380,14 +1410,11 @@ function createDiscordNativeCommand(params: {
               });
               if (created) {
                 await interaction.reply({
-                  content: [
-                    "Clawdbot: access not configured.",
-                    "",
-                    `Pairing code: ${code}`,
-                    "",
-                    "Ask the bot owner to approve with:",
-                    "clawdbot pairing approve --provider discord <code>",
-                  ].join("\n"),
+                  content: buildPairingReply({
+                    provider: "discord",
+                    idLine: `Your Discord user id: ${user.id}`,
+                    code,
+                  }),
                   ephemeral: true,
                 });
               }

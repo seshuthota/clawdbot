@@ -61,6 +61,14 @@ const GroupChatSchema = z
   })
   .optional();
 
+const IdentitySchema = z
+  .object({
+    name: z.string().optional(),
+    theme: z.string().optional(),
+    emoji: z.string().optional(),
+  })
+  .optional();
+
 const QueueModeSchema = z.union([
   z.literal("steer"),
   z.literal("followup"),
@@ -109,6 +117,8 @@ const requireOpenAllowFrom = (params: {
   });
 };
 
+const MSTeamsReplyStyleSchema = z.enum(["thread", "top-level"]);
+
 const RetryConfigSchema = z
   .object({
     attempts: z.number().int().min(1).optional(),
@@ -126,7 +136,18 @@ const QueueModeBySurfaceSchema = z
     slack: QueueModeSchema.optional(),
     signal: QueueModeSchema.optional(),
     imessage: QueueModeSchema.optional(),
+    msteams: QueueModeSchema.optional(),
     webchat: QueueModeSchema.optional(),
+  })
+  .optional();
+
+const QueueSchema = z
+  .object({
+    mode: QueueModeSchema.optional(),
+    byProvider: QueueModeBySurfaceSchema,
+    debounceMs: z.number().int().nonnegative().optional(),
+    cap: z.number().int().positive().optional(),
+    drop: QueueDropSchema.optional(),
   })
   .optional();
 
@@ -309,6 +330,7 @@ const SlackChannelSchema = z.object({
   enabled: z.boolean().optional(),
   allow: z.boolean().optional(),
   requireMention: z.boolean().optional(),
+  allowBots: z.boolean().optional(),
   users: z.array(z.union([z.string(), z.number()])).optional(),
   skills: z.array(z.string()).optional(),
   systemPrompt: z.string().optional(),
@@ -319,11 +341,13 @@ const SlackAccountSchema = z.object({
   enabled: z.boolean().optional(),
   botToken: z.string().optional(),
   appToken: z.string().optional(),
+  allowBots: z.boolean().optional(),
   groupPolicy: GroupPolicySchema.optional().default("open"),
   textChunkLimit: z.number().int().positive().optional(),
   mediaMaxMb: z.number().positive().optional(),
   reactionNotifications: z.enum(["off", "own", "all", "allowlist"]).optional(),
   reactionAllowlist: z.array(z.union([z.string(), z.number()])).optional(),
+  replyToMode: ReplyToModeSchema.optional(),
   actions: z
     .object({
       reactions: z.boolean().optional(),
@@ -452,6 +476,48 @@ const IMessageConfigSchema = IMessageAccountSchemaBase.extend({
   });
 });
 
+const MSTeamsChannelSchema = z.object({
+  requireMention: z.boolean().optional(),
+  replyStyle: MSTeamsReplyStyleSchema.optional(),
+});
+
+const MSTeamsTeamSchema = z.object({
+  requireMention: z.boolean().optional(),
+  replyStyle: MSTeamsReplyStyleSchema.optional(),
+  channels: z.record(z.string(), MSTeamsChannelSchema.optional()).optional(),
+});
+
+const MSTeamsConfigSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    appId: z.string().optional(),
+    appPassword: z.string().optional(),
+    tenantId: z.string().optional(),
+    webhook: z
+      .object({
+        port: z.number().int().positive().optional(),
+        path: z.string().optional(),
+      })
+      .optional(),
+    dmPolicy: DmPolicySchema.optional().default("pairing"),
+    allowFrom: z.array(z.string()).optional(),
+    textChunkLimit: z.number().int().positive().optional(),
+    mediaAllowHosts: z.array(z.string()).optional(),
+    requireMention: z.boolean().optional(),
+    replyStyle: MSTeamsReplyStyleSchema.optional(),
+    teams: z.record(z.string(), MSTeamsTeamSchema.optional()).optional(),
+  })
+  .superRefine((value, ctx) => {
+    requireOpenAllowFrom({
+      policy: value.dmPolicy,
+      allowFrom: value.allowFrom,
+      ctx,
+      path: ["allowFrom"],
+      message:
+        'msteams.dmPolicy="open" requires msteams.allowFrom to include "*"',
+    });
+  });
+
 const SessionSchema = z
   .object({
     scope: z.union([z.literal("per-sender"), z.literal("global")]).optional(),
@@ -506,6 +572,8 @@ const MessagesSchema = z
   .object({
     messagePrefix: z.string().optional(),
     responsePrefix: z.string().optional(),
+    groupChat: GroupChatSchema,
+    queue: QueueSchema,
     ackReaction: z.string().optional(),
     ackReactionScope: z
       .enum(["group-mentions", "group-all", "direct", "all"])
@@ -517,6 +585,7 @@ const CommandsSchema = z
   .object({
     native: z.boolean().optional(),
     text: z.boolean().optional(),
+    restart: z.boolean().optional(),
     useAccessGroups: z.boolean().optional(),
   })
   .optional();
@@ -618,90 +687,140 @@ const ToolPolicySchema = z
   })
   .optional();
 
-const RoutingSchema = z
+const ElevatedAllowFromSchema = z
   .object({
-    groupChat: GroupChatSchema,
-    transcribeAudio: TranscribeAudioSchema,
-    defaultAgentId: z.string().optional(),
+    whatsapp: z.array(z.string()).optional(),
+    telegram: z.array(z.union([z.string(), z.number()])).optional(),
+    discord: z.array(z.union([z.string(), z.number()])).optional(),
+    slack: z.array(z.union([z.string(), z.number()])).optional(),
+    signal: z.array(z.union([z.string(), z.number()])).optional(),
+    imessage: z.array(z.union([z.string(), z.number()])).optional(),
+    webchat: z.array(z.union([z.string(), z.number()])).optional(),
+  })
+  .optional();
+
+const AgentSandboxSchema = z
+  .object({
+    mode: z
+      .union([z.literal("off"), z.literal("non-main"), z.literal("all")])
+      .optional(),
+    workspaceAccess: z
+      .union([z.literal("none"), z.literal("ro"), z.literal("rw")])
+      .optional(),
+    sessionToolsVisibility: z
+      .union([z.literal("spawned"), z.literal("all")])
+      .optional(),
+    scope: z
+      .union([z.literal("session"), z.literal("agent"), z.literal("shared")])
+      .optional(),
+    perSession: z.boolean().optional(),
+    workspaceRoot: z.string().optional(),
+    docker: SandboxDockerSchema,
+    browser: SandboxBrowserSchema,
+    prune: SandboxPruneSchema,
+  })
+  .optional();
+
+const AgentToolsSchema = z
+  .object({
+    allow: z.array(z.string()).optional(),
+    deny: z.array(z.string()).optional(),
+    sandbox: z
+      .object({
+        tools: ToolPolicySchema,
+      })
+      .optional(),
+  })
+  .optional();
+
+const AgentEntrySchema = z.object({
+  id: z.string(),
+  default: z.boolean().optional(),
+  name: z.string().optional(),
+  workspace: z.string().optional(),
+  agentDir: z.string().optional(),
+  model: z.string().optional(),
+  identity: IdentitySchema,
+  groupChat: GroupChatSchema,
+  subagents: z
+    .object({
+      allowAgents: z.array(z.string()).optional(),
+    })
+    .optional(),
+  sandbox: AgentSandboxSchema,
+  tools: AgentToolsSchema,
+});
+
+const ToolsSchema = z
+  .object({
+    allow: z.array(z.string()).optional(),
+    deny: z.array(z.string()).optional(),
     agentToAgent: z
       .object({
         enabled: z.boolean().optional(),
         allow: z.array(z.string()).optional(),
       })
       .optional(),
-    agents: z
-      .record(
-        z.string(),
-        z
-          .object({
-            name: z.string().optional(),
-            workspace: z.string().optional(),
-            agentDir: z.string().optional(),
-            model: z.string().optional(),
-            sandbox: z
-              .object({
-                mode: z
-                  .union([
-                    z.literal("off"),
-                    z.literal("non-main"),
-                    z.literal("all"),
-                  ])
-                  .optional(),
-                workspaceAccess: z
-                  .union([z.literal("none"), z.literal("ro"), z.literal("rw")])
-                  .optional(),
-                scope: z
-                  .union([
-                    z.literal("session"),
-                    z.literal("agent"),
-                    z.literal("shared"),
-                  ])
-                  .optional(),
-                perSession: z.boolean().optional(),
-                workspaceRoot: z.string().optional(),
-                docker: SandboxDockerSchema,
-                browser: SandboxBrowserSchema,
-                tools: ToolPolicySchema,
-                prune: SandboxPruneSchema,
-              })
-              .optional(),
-            tools: ToolPolicySchema,
-          })
-          .optional(),
-      )
-      .optional(),
-    bindings: z
-      .array(
-        z.object({
-          agentId: z.string(),
-          match: z.object({
-            provider: z.string(),
-            accountId: z.string().optional(),
-            peer: z
-              .object({
-                kind: z.union([
-                  z.literal("dm"),
-                  z.literal("group"),
-                  z.literal("channel"),
-                ]),
-                id: z.string(),
-              })
-              .optional(),
-            guildId: z.string().optional(),
-            teamId: z.string().optional(),
-          }),
-        }),
-      )
-      .optional(),
-    queue: z
+    elevated: z
       .object({
-        mode: QueueModeSchema.optional(),
-        byProvider: QueueModeBySurfaceSchema,
-        debounceMs: z.number().int().nonnegative().optional(),
-        cap: z.number().int().positive().optional(),
-        drop: QueueDropSchema.optional(),
+        enabled: z.boolean().optional(),
+        allowFrom: ElevatedAllowFromSchema,
       })
       .optional(),
+    bash: z
+      .object({
+        backgroundMs: z.number().int().positive().optional(),
+        timeoutSec: z.number().int().positive().optional(),
+        cleanupMs: z.number().int().positive().optional(),
+      })
+      .optional(),
+    subagents: z
+      .object({
+        tools: ToolPolicySchema,
+      })
+      .optional(),
+    sandbox: z
+      .object({
+        tools: ToolPolicySchema,
+      })
+      .optional(),
+  })
+  .optional();
+
+const AgentsSchema = z
+  .object({
+    defaults: z.lazy(() => AgentDefaultsSchema).optional(),
+    list: z.array(AgentEntrySchema).optional(),
+  })
+  .optional();
+
+const BindingsSchema = z
+  .array(
+    z.object({
+      agentId: z.string(),
+      match: z.object({
+        provider: z.string(),
+        accountId: z.string().optional(),
+        peer: z
+          .object({
+            kind: z.union([
+              z.literal("dm"),
+              z.literal("group"),
+              z.literal("channel"),
+            ]),
+            id: z.string(),
+          })
+          .optional(),
+        guildId: z.string().optional(),
+        teamId: z.string().optional(),
+      }),
+    }),
+  )
+  .optional();
+
+const AudioSchema = z
+  .object({
+    transcription: TranscribeAudioSchema,
   })
   .optional();
 
@@ -732,9 +851,11 @@ const HookMappingSchema = z
         z.literal("slack"),
         z.literal("signal"),
         z.literal("imessage"),
+        z.literal("msteams"),
       ])
       .optional(),
     to: z.string().optional(),
+    model: z.string().optional(),
     thinking: z.string().optional(),
     timeoutSeconds: z.number().int().positive().optional(),
     transform: z
@@ -775,6 +896,145 @@ const HooksGmailSchema = z
   })
   .optional();
 
+const AgentDefaultsSchema = z
+  .object({
+    model: z
+      .object({
+        primary: z.string().optional(),
+        fallbacks: z.array(z.string()).optional(),
+      })
+      .optional(),
+    imageModel: z
+      .object({
+        primary: z.string().optional(),
+        fallbacks: z.array(z.string()).optional(),
+      })
+      .optional(),
+    models: z
+      .record(
+        z.string(),
+        z.object({
+          alias: z.string().optional(),
+          /** Provider-specific API parameters (e.g., GLM-4.7 thinking mode). */
+          params: z.record(z.string(), z.unknown()).optional(),
+        }),
+      )
+      .optional(),
+    workspace: z.string().optional(),
+    skipBootstrap: z.boolean().optional(),
+    userTimezone: z.string().optional(),
+    contextTokens: z.number().int().positive().optional(),
+    contextPruning: z
+      .object({
+        mode: z
+          .union([
+            z.literal("off"),
+            z.literal("adaptive"),
+            z.literal("aggressive"),
+          ])
+          .optional(),
+        keepLastAssistants: z.number().int().nonnegative().optional(),
+        softTrimRatio: z.number().min(0).max(1).optional(),
+        hardClearRatio: z.number().min(0).max(1).optional(),
+        minPrunableToolChars: z.number().int().nonnegative().optional(),
+        tools: z
+          .object({
+            allow: z.array(z.string()).optional(),
+            deny: z.array(z.string()).optional(),
+          })
+          .optional(),
+        softTrim: z
+          .object({
+            maxChars: z.number().int().nonnegative().optional(),
+            headChars: z.number().int().nonnegative().optional(),
+            tailChars: z.number().int().nonnegative().optional(),
+          })
+          .optional(),
+        hardClear: z
+          .object({
+            enabled: z.boolean().optional(),
+            placeholder: z.string().optional(),
+          })
+          .optional(),
+      })
+      .optional(),
+    thinkingDefault: z
+      .union([
+        z.literal("off"),
+        z.literal("minimal"),
+        z.literal("low"),
+        z.literal("medium"),
+        z.literal("high"),
+      ])
+      .optional(),
+    verboseDefault: z.union([z.literal("off"), z.literal("on")]).optional(),
+    elevatedDefault: z.union([z.literal("off"), z.literal("on")]).optional(),
+    blockStreamingDefault: z
+      .union([z.literal("off"), z.literal("on")])
+      .optional(),
+    blockStreamingBreak: z
+      .union([z.literal("text_end"), z.literal("message_end")])
+      .optional(),
+    blockStreamingChunk: z
+      .object({
+        minChars: z.number().int().positive().optional(),
+        maxChars: z.number().int().positive().optional(),
+        breakPreference: z
+          .union([
+            z.literal("paragraph"),
+            z.literal("newline"),
+            z.literal("sentence"),
+          ])
+          .optional(),
+      })
+      .optional(),
+    timeoutSeconds: z.number().int().positive().optional(),
+    mediaMaxMb: z.number().positive().optional(),
+    typingIntervalSeconds: z.number().int().positive().optional(),
+    typingMode: z
+      .union([
+        z.literal("never"),
+        z.literal("instant"),
+        z.literal("thinking"),
+        z.literal("message"),
+      ])
+      .optional(),
+    heartbeat: HeartbeatSchema,
+    maxConcurrent: z.number().int().positive().optional(),
+    subagents: z
+      .object({
+        maxConcurrent: z.number().int().positive().optional(),
+        archiveAfterMinutes: z.number().int().positive().optional(),
+      })
+      .optional(),
+    sandbox: z
+      .object({
+        mode: z
+          .union([z.literal("off"), z.literal("non-main"), z.literal("all")])
+          .optional(),
+        workspaceAccess: z
+          .union([z.literal("none"), z.literal("ro"), z.literal("rw")])
+          .optional(),
+        sessionToolsVisibility: z
+          .union([z.literal("spawned"), z.literal("all")])
+          .optional(),
+        scope: z
+          .union([
+            z.literal("session"),
+            z.literal("agent"),
+            z.literal("shared"),
+          ])
+          .optional(),
+        perSession: z.boolean().optional(),
+        workspaceRoot: z.string().optional(),
+        docker: SandboxDockerSchema,
+        browser: SandboxBrowserSchema,
+        prune: SandboxPruneSchema,
+      })
+      .optional(),
+  })
+  .optional();
+
 export const ClawdbotSchema = z.object({
   env: z
     .object({
@@ -784,14 +1044,9 @@ export const ClawdbotSchema = z.object({
           timeoutMs: z.number().int().nonnegative().optional(),
         })
         .optional(),
+      vars: z.record(z.string(), z.string()).optional(),
     })
-    .optional(),
-  identity: z
-    .object({
-      name: z.string().optional(),
-      theme: z.string().optional(),
-      emoji: z.string().optional(),
-    })
+    .catchall(z.string())
     .optional(),
   wizard: z
     .object({
@@ -882,7 +1137,11 @@ export const ClawdbotSchema = z.object({
           z.string(),
           z.object({
             provider: z.string(),
-            mode: z.union([z.literal("api_key"), z.literal("oauth")]),
+            mode: z.union([
+              z.literal("api_key"),
+              z.literal("oauth"),
+              z.literal("token"),
+            ]),
             email: z.string().optional(),
           }),
         )
@@ -891,181 +1150,10 @@ export const ClawdbotSchema = z.object({
     })
     .optional(),
   models: ModelsConfigSchema,
-  agent: z
-    .object({
-      model: z
-        .object({
-          primary: z.string().optional(),
-          fallbacks: z.array(z.string()).optional(),
-        })
-        .optional(),
-      imageModel: z
-        .object({
-          primary: z.string().optional(),
-          fallbacks: z.array(z.string()).optional(),
-        })
-        .optional(),
-      models: z
-        .record(
-          z.string(),
-          z.object({
-            alias: z.string().optional(),
-            /** Provider-specific API parameters (e.g., GLM-4.7 thinking mode). */
-            params: z.record(z.string(), z.unknown()).optional(),
-          }),
-        )
-        .optional(),
-      workspace: z.string().optional(),
-      skipBootstrap: z.boolean().optional(),
-      userTimezone: z.string().optional(),
-      contextTokens: z.number().int().positive().optional(),
-      contextPruning: z
-        .object({
-          mode: z
-            .union([
-              z.literal("off"),
-              z.literal("adaptive"),
-              z.literal("aggressive"),
-            ])
-            .optional(),
-          keepLastAssistants: z.number().int().nonnegative().optional(),
-          softTrimRatio: z.number().min(0).max(1).optional(),
-          hardClearRatio: z.number().min(0).max(1).optional(),
-          minPrunableToolChars: z.number().int().nonnegative().optional(),
-          tools: z
-            .object({
-              allow: z.array(z.string()).optional(),
-              deny: z.array(z.string()).optional(),
-            })
-            .optional(),
-          softTrim: z
-            .object({
-              maxChars: z.number().int().nonnegative().optional(),
-              headChars: z.number().int().nonnegative().optional(),
-              tailChars: z.number().int().nonnegative().optional(),
-            })
-            .optional(),
-          hardClear: z
-            .object({
-              enabled: z.boolean().optional(),
-              placeholder: z.string().optional(),
-            })
-            .optional(),
-        })
-        .optional(),
-      tools: z
-        .object({
-          allow: z.array(z.string()).optional(),
-          deny: z.array(z.string()).optional(),
-        })
-        .optional(),
-      thinkingDefault: z
-        .union([
-          z.literal("off"),
-          z.literal("minimal"),
-          z.literal("low"),
-          z.literal("medium"),
-          z.literal("high"),
-        ])
-        .optional(),
-      verboseDefault: z.union([z.literal("off"), z.literal("on")]).optional(),
-      elevatedDefault: z.union([z.literal("off"), z.literal("on")]).optional(),
-      blockStreamingDefault: z
-        .union([z.literal("off"), z.literal("on")])
-        .optional(),
-      blockStreamingBreak: z
-        .union([z.literal("text_end"), z.literal("message_end")])
-        .optional(),
-      blockStreamingChunk: z
-        .object({
-          minChars: z.number().int().positive().optional(),
-          maxChars: z.number().int().positive().optional(),
-          breakPreference: z
-            .union([
-              z.literal("paragraph"),
-              z.literal("newline"),
-              z.literal("sentence"),
-            ])
-            .optional(),
-        })
-        .optional(),
-      timeoutSeconds: z.number().int().positive().optional(),
-      mediaMaxMb: z.number().positive().optional(),
-      typingIntervalSeconds: z.number().int().positive().optional(),
-      typingMode: z
-        .union([
-          z.literal("never"),
-          z.literal("instant"),
-          z.literal("thinking"),
-          z.literal("message"),
-        ])
-        .optional(),
-      heartbeat: HeartbeatSchema,
-      maxConcurrent: z.number().int().positive().optional(),
-      subagents: z
-        .object({
-          maxConcurrent: z.number().int().positive().optional(),
-          archiveAfterMinutes: z.number().int().positive().optional(),
-          tools: z
-            .object({
-              allow: z.array(z.string()).optional(),
-              deny: z.array(z.string()).optional(),
-            })
-            .optional(),
-        })
-        .optional(),
-      bash: z
-        .object({
-          backgroundMs: z.number().int().positive().optional(),
-          timeoutSec: z.number().int().positive().optional(),
-          cleanupMs: z.number().int().positive().optional(),
-        })
-        .optional(),
-      elevated: z
-        .object({
-          enabled: z.boolean().optional(),
-          allowFrom: z
-            .object({
-              whatsapp: z.array(z.string()).optional(),
-              telegram: z.array(z.union([z.string(), z.number()])).optional(),
-              discord: z.array(z.union([z.string(), z.number()])).optional(),
-              slack: z.array(z.union([z.string(), z.number()])).optional(),
-              signal: z.array(z.union([z.string(), z.number()])).optional(),
-              imessage: z.array(z.union([z.string(), z.number()])).optional(),
-              webchat: z.array(z.union([z.string(), z.number()])).optional(),
-            })
-            .optional(),
-        })
-        .optional(),
-      sandbox: z
-        .object({
-          mode: z
-            .union([z.literal("off"), z.literal("non-main"), z.literal("all")])
-            .optional(),
-          workspaceAccess: z
-            .union([z.literal("none"), z.literal("ro"), z.literal("rw")])
-            .optional(),
-          sessionToolsVisibility: z
-            .union([z.literal("spawned"), z.literal("all")])
-            .optional(),
-          scope: z
-            .union([
-              z.literal("session"),
-              z.literal("agent"),
-              z.literal("shared"),
-            ])
-            .optional(),
-          perSession: z.boolean().optional(),
-          workspaceRoot: z.string().optional(),
-          docker: SandboxDockerSchema,
-          browser: SandboxBrowserSchema,
-          tools: ToolPolicySchema,
-          prune: SandboxPruneSchema,
-        })
-        .optional(),
-    })
-    .optional(),
-  routing: RoutingSchema,
+  agents: AgentsSchema,
+  tools: ToolsSchema,
+  bindings: BindingsSchema,
+  audio: AudioSchema,
   messages: MessagesSchema,
   commands: CommandsSchema,
   session: SessionSchema,
@@ -1183,12 +1271,12 @@ export const ClawdbotSchema = z.object({
       });
     })
     .optional(),
-
   telegram: TelegramConfigSchema.optional(),
   discord: DiscordConfigSchema.optional(),
   slack: SlackConfigSchema.optional(),
   signal: SignalConfigSchema.optional(),
   imessage: IMessageConfigSchema.optional(),
+  msteams: MSTeamsConfigSchema.optional(),
   bridge: z
     .object({
       enabled: z.boolean().optional(),
@@ -1269,6 +1357,8 @@ export const ClawdbotSchema = z.object({
           url: z.string().optional(),
           token: z.string().optional(),
           password: z.string().optional(),
+          sshTarget: z.string().optional(),
+          sshIdentity: z.string().optional(),
         })
         .optional(),
       reload: z

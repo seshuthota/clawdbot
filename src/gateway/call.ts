@@ -1,6 +1,11 @@
 import { randomUUID } from "node:crypto";
 import type { ClawdbotConfig } from "../config/config.js";
-import { loadConfig, resolveGatewayPort } from "../config/config.js";
+import {
+  loadConfig,
+  resolveConfigPath,
+  resolveGatewayPort,
+  resolveStateDir,
+} from "../config/config.js";
 import { pickPrimaryTailnetIPv4 } from "../infra/tailnet.js";
 import { GatewayClient } from "./client.js";
 import { PROTOCOL_VERSION } from "./protocol/index.js";
@@ -20,6 +25,11 @@ export type CallGatewayOptions = {
   instanceId?: string;
   minProtocol?: number;
   maxProtocol?: number;
+  /**
+   * Overrides the config path shown in connection error details.
+   * Does not affect config loading; callers still control auth via opts.token/password/env/config.
+   */
+  configPath?: string;
 };
 
 export type GatewayConnectionDetails = {
@@ -31,9 +41,12 @@ export type GatewayConnectionDetails = {
 };
 
 export function buildGatewayConnectionDetails(
-  options: { config?: ClawdbotConfig; url?: string } = {},
+  options: { config?: ClawdbotConfig; url?: string; configPath?: string } = {},
 ): GatewayConnectionDetails {
   const config = options.config ?? loadConfig();
+  const configPath =
+    options.configPath ??
+    resolveConfigPath(process.env, resolveStateDir(process.env));
   const isRemoteMode = config.gateway?.mode === "remote";
   const remote = isRemoteMode ? config.gateway?.remote : undefined;
   const localPort = resolveGatewayPort(config);
@@ -70,6 +83,7 @@ export function buildGatewayConnectionDetails(
   const message = [
     `Gateway target: ${url}`,
     `Source: ${urlSource}`,
+    `Config: ${configPath}`,
     bindDetail,
     remoteFallbackNote,
   ]
@@ -97,6 +111,7 @@ export async function callGateway<T = unknown>(
   const connectionDetails = buildGatewayConnectionDetails({
     config,
     url: opts.url,
+    ...(opts.configPath ? { configPath: opts.configPath } : {}),
   });
   const url = connectionDetails.url;
   const token =

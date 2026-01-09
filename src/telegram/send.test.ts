@@ -1,5 +1,13 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+const { botApi, botCtorSpy } = vi.hoisted(() => ({
+  botApi: {
+    sendMessage: vi.fn(),
+    setMessageReaction: vi.fn(),
+  },
+  botCtorSpy: vi.fn(),
+}));
+
 const { loadWebMedia } = vi.hoisted(() => ({
   loadWebMedia: vi.fn(),
 }));
@@ -8,11 +16,26 @@ vi.mock("../web/media.js", () => ({
   loadWebMedia,
 }));
 
+vi.mock("grammy", () => ({
+  Bot: class {
+    api = botApi;
+    constructor(
+      public token: string,
+      public options?: { client?: { fetch?: typeof fetch } },
+    ) {
+      botCtorSpy(token, options);
+    }
+  },
+  InputFile: class {},
+}));
+
 import { reactMessageTelegram, sendMessageTelegram } from "./send.js";
 
 describe("sendMessageTelegram", () => {
   beforeEach(() => {
     loadWebMedia.mockReset();
+    botApi.sendMessage.mockReset();
+    botCtorSpy.mockReset();
   });
 
   it("falls back to plain text when Telegram rejects HTML", async () => {
@@ -43,6 +66,34 @@ describe("sendMessageTelegram", () => {
     expect(sendMessage).toHaveBeenNthCalledWith(2, chatId, "_oops_");
     expect(res.chatId).toBe(chatId);
     expect(res.messageId).toBe("42");
+  });
+
+  it("uses native fetch for BAN compatibility when api is omitted", async () => {
+    const originalFetch = globalThis.fetch;
+    const originalBun = (globalThis as { Bun?: unknown }).Bun;
+    const fetchSpy = vi.fn() as unknown as typeof fetch;
+    globalThis.fetch = fetchSpy;
+    (globalThis as { Bun?: unknown }).Bun = {};
+    botApi.sendMessage.mockResolvedValue({
+      message_id: 1,
+      chat: { id: "123" },
+    });
+    try {
+      await sendMessageTelegram("123", "hi", { token: "tok" });
+      expect(botCtorSpy).toHaveBeenCalledWith(
+        "tok",
+        expect.objectContaining({
+          client: expect.objectContaining({ fetch: fetchSpy }),
+        }),
+      );
+    } finally {
+      globalThis.fetch = originalFetch;
+      if (originalBun === undefined) {
+        delete (globalThis as { Bun?: unknown }).Bun;
+      } else {
+        (globalThis as { Bun?: unknown }).Bun = originalBun;
+      }
+    }
   });
 
   it("normalizes chat ids with internal prefixes", async () => {
@@ -244,6 +295,31 @@ describe("sendMessageTelegram", () => {
       api,
       messageThreadId: 271,
     });
+
+    expect(sendMessage).toHaveBeenCalledWith(chatId, "hello forum", {
+      parse_mode: "HTML",
+      message_thread_id: 271,
+    });
+  });
+
+  it("parses message_thread_id from recipient string (telegram:group:...:topic:...)", async () => {
+    const chatId = "-1001234567890";
+    const sendMessage = vi.fn().mockResolvedValue({
+      message_id: 55,
+      chat: { id: chatId },
+    });
+    const api = { sendMessage } as unknown as {
+      sendMessage: typeof sendMessage;
+    };
+
+    await sendMessageTelegram(
+      `telegram:group:${chatId}:topic:271`,
+      "hello forum",
+      {
+        token: "tok",
+        api,
+      },
+    );
 
     expect(sendMessage).toHaveBeenCalledWith(chatId, "hello forum", {
       parse_mode: "HTML",

@@ -53,19 +53,21 @@ async function withTempHome<T>(fn: (home: string) => Promise<T>): Promise<T> {
 function mockConfig(
   home: string,
   storePath: string,
-  routingOverrides?: Partial<NonNullable<ClawdbotConfig["routing"]>>,
-  agentOverrides?: Partial<NonNullable<ClawdbotConfig["agent"]>>,
+  agentOverrides?: Partial<
+    NonNullable<NonNullable<ClawdbotConfig["agents"]>["defaults"]>
+  >,
   telegramOverrides?: Partial<NonNullable<ClawdbotConfig["telegram"]>>,
 ) {
   configSpy.mockReturnValue({
-    agent: {
-      model: { primary: "anthropic/claude-opus-4-5" },
-      models: { "anthropic/claude-opus-4-5": {} },
-      workspace: path.join(home, "clawd"),
-      ...agentOverrides,
+    agents: {
+      defaults: {
+        model: { primary: "anthropic/claude-opus-4-5" },
+        models: { "anthropic/claude-opus-4-5": {} },
+        workspace: path.join(home, "clawd"),
+        ...agentOverrides,
+      },
     },
     session: { store: storePath, mainKey: "main" },
-    routing: routingOverrides ? { ...routingOverrides } : undefined,
     telegram: telegramOverrides ? { ...telegramOverrides } : undefined,
   });
 }
@@ -153,11 +155,15 @@ describe("agentCommand", () => {
     });
   });
 
-  it("uses provider/model from agent.model", async () => {
+  it("uses provider/model from agents.defaults.model.primary", async () => {
     await withTempHome(async (home) => {
       const store = path.join(home, "sessions.json");
-      mockConfig(home, store, undefined, {
-        model: "openai/gpt-4.1-mini",
+      mockConfig(home, store, {
+        model: { primary: "openai/gpt-4.1-mini" },
+        models: {
+          "anthropic/claude-opus-4-5": {},
+          "openai/gpt-4.1-mini": {},
+        },
       });
 
       await agentCommand({ message: "hi", to: "+1555" }, runtime);
@@ -266,10 +272,10 @@ describe("agentCommand", () => {
     });
   });
 
-  it("passes telegram account id when delivering", async () => {
+  it("passes through telegram accountId when delivering", async () => {
     await withTempHome(async (home) => {
       const store = path.join(home, "sessions.json");
-      mockConfig(home, store, undefined, undefined, { botToken: "t-1" });
+      mockConfig(home, store, undefined, { botToken: "t-1" });
       const deps = {
         sendMessageWhatsApp: vi.fn(),
         sendMessageTelegram: vi
@@ -297,7 +303,7 @@ describe("agentCommand", () => {
         expect(deps.sendMessageTelegram).toHaveBeenCalledWith(
           "123",
           "ok",
-          expect.objectContaining({ accountId: "default", verbose: false }),
+          expect.objectContaining({ accountId: undefined, verbose: false }),
         );
       } finally {
         if (prevTelegramToken === undefined) {

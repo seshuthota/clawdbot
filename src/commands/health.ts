@@ -1,3 +1,4 @@
+import { withProgress } from "../cli/progress.js";
 import { loadConfig } from "../config/config.js";
 import { loadSessionStore, resolveStorePath } from "../config/sessions.js";
 import { type DiscordProbe, probeDiscord } from "../discord/probe.js";
@@ -114,10 +115,18 @@ export async function healthCommand(
   runtime: RuntimeEnv,
 ) {
   // Always query the running gateway; do not open a direct Baileys socket here.
-  const summary = await callGateway<HealthSummary>({
-    method: "health",
-    timeoutMs: opts.timeoutMs,
-  });
+  const summary = await withProgress(
+    {
+      label: "Checking gateway health…",
+      indeterminate: true,
+      enabled: opts.json !== true,
+    },
+    async () =>
+      await callGateway<HealthSummary>({
+        method: "health",
+        timeoutMs: opts.timeoutMs,
+      }),
+  );
   // Gateway reachability defines success; provider issues are reported but not fatal here.
   const fatal = false;
 
@@ -134,7 +143,7 @@ export async function healthCommand(
     runtime.log(
       summary.web.linked
         ? `Web: linked (auth age ${summary.web.authAgeMs ? `${Math.round(summary.web.authAgeMs / 60000)}m` : "unknown"})`
-        : "Web: not linked (run clawdbot login)",
+        : "Web: not linked (run clawdbot providers login)",
     );
     if (summary.web.linked) {
       const cfg = loadConfig();

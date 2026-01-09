@@ -1,6 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import type { ClawdbotConfig } from "../config/config.js";
+import { mergeWhatsAppConfig } from "../config/merge-config.js";
 import type { DmPolicy } from "../config/types.js";
 import {
   listDiscordAccountIds,
@@ -13,6 +14,11 @@ import {
   resolveIMessageAccount,
 } from "../imessage/accounts.js";
 import { loginWeb } from "../provider-web.js";
+import {
+  formatProviderPrimerLine,
+  formatProviderSelectionLine,
+  listChatProviders,
+} from "../providers/registry.js";
 import {
   DEFAULT_ACCOUNT_ID,
   normalizeAccountId,
@@ -33,7 +39,8 @@ import {
   resolveDefaultTelegramAccountId,
   resolveTelegramAccount,
 } from "../telegram/accounts.js";
-import { formatTerminalLink, normalizeE164 } from "../utils.js";
+import { formatDocsLink } from "../terminal/links.js";
+import { normalizeE164 } from "../utils.js";
 import {
   listWhatsAppAccountIds,
   resolveDefaultWhatsAppAccountId,
@@ -43,14 +50,6 @@ import type { WizardPrompter } from "../wizard/prompts.js";
 import { detectBinary } from "./onboard-helpers.js";
 import type { ProviderChoice } from "./onboard-types.js";
 import { installSignalCli } from "./signal-install.js";
-
-const DOCS_BASE = "https://docs.clawd.bot";
-
-function docsLink(path: string, label?: string): string {
-  const cleanPath = path.startsWith("/") ? path : `/${path}`;
-  const url = `${DOCS_BASE}${cleanPath}`;
-  return formatTerminalLink(label ?? url, url, { fallback: url });
-}
 
 async function promptAccountId(params: {
   cfg: ClawdbotConfig;
@@ -118,19 +117,17 @@ async function detectWhatsAppLinked(
 }
 
 async function noteProviderPrimer(prompter: WizardPrompter): Promise<void> {
+  const providerLines = listChatProviders().map((meta) =>
+    formatProviderPrimerLine(meta),
+  );
   await prompter.note(
     [
       "DM security: default is pairing; unknown DMs get a pairing code.",
       "Approve with: clawdbot pairing approve --provider <provider> <code>",
       'Public DMs require dmPolicy="open" + allowFrom=["*"].',
-      `Docs: ${docsLink("/start/pairing", "start/pairing")}`,
+      `Docs: ${formatDocsLink("/start/pairing", "start/pairing")}`,
       "",
-      "Telegram: simplest way to get started — register a bot with @BotFather and get going.",
-      "WhatsApp: works with your own number; recommend a separate phone + eSIM.",
-      "Discord: very well supported right now.",
-      "Slack: supported (Socket Mode).",
-      'Signal: signal-cli linked device; more setup (David Reagans: "Hop on Discord.").',
-      "iMessage: this is still a work in progress.",
+      ...providerLines,
     ].join("\n"),
     "How providers work",
   );
@@ -143,7 +140,8 @@ async function noteTelegramTokenHelp(prompter: WizardPrompter): Promise<void> {
       "2) Run /newbot (or /mybots)",
       "3) Copy the token (looks like 123456:ABC...)",
       "Tip: you can also set TELEGRAM_BOT_TOKEN in your env.",
-      `Docs: ${docsLink("/telegram", "telegram")}`,
+      `Docs: ${formatDocsLink("/telegram")}`,
+      "Website: https://clawd.bot",
     ].join("\n"),
     "Telegram bot token",
   );
@@ -156,7 +154,7 @@ async function noteDiscordTokenHelp(prompter: WizardPrompter): Promise<void> {
       "2) Bot → Add Bot → Reset Token → copy token",
       "3) OAuth2 → URL Generator → scope 'bot' → invite to your server",
       "Tip: enable Message Content Intent if you need message text.",
-      `Docs: ${docsLink("/discord", "discord")}`,
+      `Docs: ${formatDocsLink("/discord", "discord")}`,
     ].join("\n"),
     "Discord bot token",
   );
@@ -244,7 +242,7 @@ async function noteSlackTokenHelp(
       "4) Enable Event Subscriptions (socket) for message events",
       "5) App Home → enable the Messages tab for DMs",
       "Tip: set SLACK_BOT_TOKEN + SLACK_APP_TOKEN in your env.",
-      `Docs: ${docsLink("/slack", "slack")}`,
+      `Docs: ${formatDocsLink("/slack", "slack")}`,
       "",
       "Manifest (JSON):",
       manifest,
@@ -253,30 +251,24 @@ async function noteSlackTokenHelp(
   );
 }
 
-function setWhatsAppDmPolicy(
+export { mergeWhatsAppConfig };
+
+export function setWhatsAppDmPolicy(
   cfg: ClawdbotConfig,
-  dmPolicy?: DmPolicy,
+  dmPolicy: DmPolicy,
 ): ClawdbotConfig {
-  return {
-    ...cfg,
-    whatsapp: {
-      ...cfg.whatsapp,
-      dmPolicy,
-    },
-  };
+  return mergeWhatsAppConfig(cfg, { dmPolicy });
 }
 
-function setWhatsAppAllowFrom(
+export function setWhatsAppAllowFrom(
   cfg: ClawdbotConfig,
   allowFrom?: string[],
 ): ClawdbotConfig {
-  return {
-    ...cfg,
-    whatsapp: {
-      ...cfg.whatsapp,
-      allowFrom,
-    },
-  };
+  return mergeWhatsAppConfig(
+    cfg,
+    { allowFrom },
+    { unsetOnUndefined: ["allowFrom"] },
+  );
 }
 
 function setMessagesResponsePrefix(
@@ -292,17 +284,11 @@ function setMessagesResponsePrefix(
   };
 }
 
-function setWhatsAppSelfChatMode(
+export function setWhatsAppSelfChatMode(
   cfg: ClawdbotConfig,
-  selfChatMode?: boolean,
+  selfChatMode: boolean,
 ): ClawdbotConfig {
-  return {
-    ...cfg,
-    whatsapp: {
-      ...cfg.whatsapp,
-      selfChatMode,
-    },
-  };
+  return mergeWhatsAppConfig(cfg, { selfChatMode });
 }
 
 function setTelegramDmPolicy(cfg: ClawdbotConfig, dmPolicy: DmPolicy) {
@@ -417,7 +403,7 @@ async function maybeConfigureDmPolicies(params: {
         "Default: pairing (unknown DMs get a pairing code).",
         `Approve: clawdbot pairing approve --provider ${params.provider} <code>`,
         `Public DMs: ${params.policyKey}="open" + ${params.allowFromKey} includes "*".`,
-        `Docs: ${docsLink("/start/pairing", "start/pairing")}`,
+        `Docs: ${formatDocsLink("/start/pairing", "start/pairing")}`,
       ].join("\n"),
       `${params.label} DM access`,
     );
@@ -484,16 +470,121 @@ async function maybeConfigureDmPolicies(params: {
   return cfg;
 }
 
+async function promptTelegramAllowFrom(params: {
+  cfg: ClawdbotConfig;
+  prompter: WizardPrompter;
+  accountId: string;
+}): Promise<ClawdbotConfig> {
+  const { cfg, prompter, accountId } = params;
+  const resolved = resolveTelegramAccount({ cfg, accountId });
+  const existingAllowFrom = resolved.config.allowFrom ?? [];
+  const entry = await prompter.text({
+    message: "Telegram allowFrom (user id)",
+    placeholder: "123456789",
+    initialValue: existingAllowFrom[0]
+      ? String(existingAllowFrom[0])
+      : undefined,
+    validate: (value) => {
+      const raw = String(value ?? "").trim();
+      if (!raw) return "Required";
+      if (!/^\d+$/.test(raw)) return "Use a numeric Telegram user id";
+      return undefined;
+    },
+  });
+  const normalized = String(entry).trim();
+  const merged = [
+    ...existingAllowFrom.map((item) => String(item).trim()).filter(Boolean),
+    normalized,
+  ];
+  const unique = [...new Set(merged)];
+
+  if (accountId === DEFAULT_ACCOUNT_ID) {
+    return {
+      ...cfg,
+      telegram: {
+        ...cfg.telegram,
+        enabled: true,
+        dmPolicy: "allowlist",
+        allowFrom: unique,
+      },
+    };
+  }
+
+  return {
+    ...cfg,
+    telegram: {
+      ...cfg.telegram,
+      enabled: true,
+      accounts: {
+        ...cfg.telegram?.accounts,
+        [accountId]: {
+          ...cfg.telegram?.accounts?.[accountId],
+          enabled: cfg.telegram?.accounts?.[accountId]?.enabled ?? true,
+          dmPolicy: "allowlist",
+          allowFrom: unique,
+        },
+      },
+    },
+  };
+}
+
 async function promptWhatsAppAllowFrom(
   cfg: ClawdbotConfig,
   _runtime: RuntimeEnv,
   prompter: WizardPrompter,
+  options?: { forceAllowlist?: boolean },
 ): Promise<ClawdbotConfig> {
   const existingPolicy = cfg.whatsapp?.dmPolicy ?? "pairing";
   const existingAllowFrom = cfg.whatsapp?.allowFrom ?? [];
   const existingLabel =
     existingAllowFrom.length > 0 ? existingAllowFrom.join(", ") : "unset";
   const existingResponsePrefix = cfg.messages?.responsePrefix;
+
+  if (options?.forceAllowlist) {
+    await prompter.note(
+      "We need the sender/owner number so Clawdbot can allowlist you.",
+      "WhatsApp number",
+    );
+    const entry = await prompter.text({
+      message:
+        "Your personal WhatsApp number (the phone you will message from)",
+      placeholder: "+15555550123",
+      initialValue: existingAllowFrom[0],
+      validate: (value) => {
+        const raw = String(value ?? "").trim();
+        if (!raw) return "Required";
+        const normalized = normalizeE164(raw);
+        if (!normalized) return `Invalid number: ${raw}`;
+        return undefined;
+      },
+    });
+    const normalized = normalizeE164(String(entry).trim());
+    const merged = [
+      ...existingAllowFrom
+        .filter((item) => item !== "*")
+        .map((item) => normalizeE164(item))
+        .filter(Boolean),
+      normalized,
+    ];
+    const unique = [...new Set(merged.filter(Boolean))];
+    let next = setWhatsAppSelfChatMode(cfg, true);
+    next = setWhatsAppDmPolicy(next, "allowlist");
+    next = setWhatsAppAllowFrom(next, unique);
+    if (existingResponsePrefix === undefined) {
+      next = setMessagesResponsePrefix(next, "[clawdbot]");
+    }
+    await prompter.note(
+      [
+        "Allowlist mode enabled.",
+        `- allowFrom includes ${normalized}`,
+        existingResponsePrefix === undefined
+          ? "- responsePrefix set to [clawdbot]"
+          : "- responsePrefix left unchanged",
+      ].join("\n"),
+      "WhatsApp allowlist",
+    );
+    return next;
+  }
 
   await prompter.note(
     [
@@ -504,7 +595,7 @@ async function promptWhatsAppAllowFrom(
       "- disabled: ignore WhatsApp DMs",
       "",
       `Current: dmPolicy=${existingPolicy}, allowFrom=${existingLabel}`,
-      `Docs: ${docsLink("/whatsapp", "whatsapp")}`,
+      `Docs: ${formatDocsLink("/whatsapp", "whatsapp")}`,
     ].join("\n"),
     "WhatsApp DM access",
   );
@@ -518,8 +609,13 @@ async function promptWhatsAppAllowFrom(
   })) as "personal" | "separate";
 
   if (phoneMode === "personal") {
+    await prompter.note(
+      "We need the sender/owner number so Clawdbot can allowlist you.",
+      "WhatsApp number",
+    );
     const entry = await prompter.text({
-      message: "Your WhatsApp number (E.164)",
+      message:
+        "Your personal WhatsApp number (the phone you will message from)",
       placeholder: "+15555550123",
       initialValue: existingAllowFrom[0],
       validate: (value) => {
@@ -576,7 +672,7 @@ async function promptWhatsAppAllowFrom(
   }
   if (policy === "disabled") return next;
 
-  const options =
+  const allowOptions =
     existingAllowFrom.length > 0
       ? ([
           { value: "keep", label: "Keep current allowFrom" },
@@ -593,8 +689,11 @@ async function promptWhatsAppAllowFrom(
 
   const mode = (await prompter.select({
     message: "WhatsApp allowFrom (optional pre-allowlist)",
-    options: options.map((opt) => ({ value: opt.value, label: opt.label })),
-  })) as (typeof options)[number]["value"];
+    options: allowOptions.map((opt) => ({
+      value: opt.value,
+      label: opt.label,
+    })),
+  })) as (typeof allowOptions)[number]["value"];
 
   if (mode === "keep") {
     // Keep allowFrom as-is.
@@ -645,6 +744,11 @@ type SetupProvidersOptions = {
   whatsappAccountId?: string;
   promptWhatsAppAccountId?: boolean;
   onWhatsAppAccountId?: (accountId: string) => void;
+  forceAllowFromProviders?: ProviderChoice[];
+  skipDmPolicyPrompt?: boolean;
+  skipConfirm?: boolean;
+  quickstartDefaults?: boolean;
+  initialSelection?: ProviderChoice[];
 };
 
 export async function setupProviders(
@@ -653,6 +757,12 @@ export async function setupProviders(
   prompter: WizardPrompter,
   options?: SetupProvidersOptions,
 ): Promise<ClawdbotConfig> {
+  const forceAllowFromProviders = new Set(
+    options?.forceAllowFromProviders ?? [],
+  );
+  const forceTelegramAllowFrom = forceAllowFromProviders.has("telegram");
+  const forceWhatsAppAllowFrom = forceAllowFromProviders.has("whatsapp");
+
   let whatsappAccountId =
     options?.whatsappAccountId?.trim() || resolveDefaultWhatsAppAccountId(cfg);
   let whatsappLinked = await detectWhatsAppLinked(cfg, whatsappAccountId);
@@ -704,50 +814,71 @@ export async function setupProviders(
     "Provider status",
   );
 
-  const shouldConfigure = await prompter.confirm({
-    message: "Configure chat providers now?",
-    initialValue: true,
-  });
+  const shouldConfigure = options?.skipConfirm
+    ? true
+    : await prompter.confirm({
+        message: "Configure chat providers now?",
+        initialValue: true,
+      });
   if (!shouldConfigure) return cfg;
 
   await noteProviderPrimer(prompter);
 
+  const selectionOptions = listChatProviders().map((meta) => {
+    switch (meta.id) {
+      case "telegram":
+        return {
+          value: meta.id,
+          label: meta.selectionLabel,
+          hint: telegramConfigured
+            ? "recommended · configured"
+            : "recommended · newcomer-friendly",
+        };
+      case "whatsapp":
+        return {
+          value: meta.id,
+          label: meta.selectionLabel,
+          hint: whatsappLinked ? "linked" : "not linked",
+        };
+      case "discord":
+        return {
+          value: meta.id,
+          label: meta.selectionLabel,
+          hint: discordConfigured ? "configured" : "needs token",
+        };
+      case "slack":
+        return {
+          value: meta.id,
+          label: meta.selectionLabel,
+          hint: slackConfigured ? "configured" : "needs tokens",
+        };
+      case "signal":
+        return {
+          value: meta.id,
+          label: meta.selectionLabel,
+          hint: signalCliDetected ? "signal-cli found" : "signal-cli missing",
+        };
+      case "imessage":
+        return {
+          value: meta.id,
+          label: meta.selectionLabel,
+          hint: imessageCliDetected ? "imsg found" : "imsg missing",
+        };
+      default:
+        return {
+          value: meta.id,
+          label: meta.selectionLabel,
+        };
+    }
+  });
+
+  const initialSelection =
+    options?.initialSelection ??
+    (options?.quickstartDefaults && !telegramConfigured ? ["telegram"] : []);
   const selection = (await prompter.multiselect({
     message: "Select providers",
-    options: [
-      {
-        value: "telegram",
-        label: "Telegram (Bot API)",
-        hint: telegramConfigured
-          ? "recommended · configured"
-          : "recommended · newcomer-friendly",
-      },
-      {
-        value: "whatsapp",
-        label: "WhatsApp (QR link)",
-        hint: whatsappLinked ? "linked" : "not linked",
-      },
-      {
-        value: "discord",
-        label: "Discord (Bot API)",
-        hint: discordConfigured ? "configured" : "needs token",
-      },
-      {
-        value: "slack",
-        label: "Slack (Socket Mode)",
-        hint: slackConfigured ? "configured" : "needs tokens",
-      },
-      {
-        value: "signal",
-        label: "Signal (signal-cli)",
-        hint: signalCliDetected ? "signal-cli found" : "signal-cli missing",
-      },
-      {
-        value: "imessage",
-        label: "iMessage (imsg)",
-        hint: imessageCliDetected ? "imsg found" : "imsg missing",
-      },
-    ],
+    options: selectionOptions,
+    initialValues: initialSelection.length ? initialSelection : undefined,
   })) as ProviderChoice[];
 
   options?.onSelection?.(selection);
@@ -764,17 +895,15 @@ export async function setupProviders(
     }
   };
 
-  const selectionNotes: Record<ProviderChoice, string> = {
-    telegram: `Telegram — simplest way to get started: register a bot with @BotFather and get going. Docs: ${docsLink("/telegram", "telegram")}`,
-    whatsapp: `WhatsApp — works with your own number; recommend a separate phone + eSIM. Docs: ${docsLink("/whatsapp", "whatsapp")}`,
-    discord: `Discord — very well supported right now. Docs: ${docsLink("/discord", "discord")}`,
-    slack: `Slack — supported (Socket Mode). Docs: ${docsLink("/slack", "slack")}`,
-    signal: `Signal — signal-cli linked device; more setup (David Reagans: "Hop on Discord."). Docs: ${docsLink("/signal", "signal")}`,
-    imessage: `iMessage — this is still a work in progress. Docs: ${docsLink("/imessage", "imessage")}`,
-  };
+  const selectionNotes = new Map(
+    listChatProviders().map((meta) => [
+      meta.id,
+      formatProviderSelectionLine(meta, formatDocsLink),
+    ]),
+  );
   const selectedLines = selection
-    .map((provider) => selectionNotes[provider])
-    .filter(Boolean);
+    .map((provider) => selectionNotes.get(provider))
+    .filter((line): line is string => Boolean(line));
   if (selectedLines.length > 0) {
     await prompter.note(selectedLines.join("\n"), "Selected providers");
   }
@@ -827,7 +956,7 @@ export async function setupProviders(
         [
           "Scan the QR with WhatsApp on your phone.",
           `Credentials are stored under ${authDir}/ for future runs.`,
-          `Docs: ${docsLink("/whatsapp", "whatsapp")}`,
+          `Docs: ${formatDocsLink("/whatsapp", "whatsapp")}`,
         ].join("\n"),
         "WhatsApp linking",
       );
@@ -844,18 +973,20 @@ export async function setupProviders(
       } catch (err) {
         runtime.error(`WhatsApp login failed: ${String(err)}`);
         await prompter.note(
-          `Docs: ${docsLink("/whatsapp", "whatsapp")}`,
+          `Docs: ${formatDocsLink("/whatsapp", "whatsapp")}`,
           "WhatsApp help",
         );
       }
     } else if (!whatsappLinked) {
       await prompter.note(
-        "Run `clawdbot login` later to link WhatsApp.",
+        "Run `clawdbot providers login` later to link WhatsApp.",
         "WhatsApp",
       );
     }
 
-    next = await promptWhatsAppAllowFrom(next, runtime, prompter);
+    next = await promptWhatsAppAllowFrom(next, runtime, prompter, {
+      forceAllowlist: forceWhatsAppAllowFrom,
+    });
   }
 
   if (selection.includes("telegram")) {
@@ -962,6 +1093,14 @@ export async function setupProviders(
           },
         };
       }
+    }
+
+    if (forceTelegramAllowFrom) {
+      next = await promptTelegramAllowFrom({
+        cfg: next,
+        prompter,
+        accountId: telegramAccountId,
+      });
     }
   }
 
@@ -1328,7 +1467,7 @@ export async function setupProviders(
         'Link device with: signal-cli link -n "Clawdbot"',
         "Scan QR in Signal → Linked Devices",
         "Then run: clawdbot gateway call providers.status --params '{\"probe\":true}'",
-        `Docs: ${docsLink("/signal", "signal")}`,
+        `Docs: ${formatDocsLink("/signal", "signal")}`,
       ].join("\n"),
       "Signal next steps",
     );
@@ -1409,13 +1548,15 @@ export async function setupProviders(
         "Ensure Clawdbot has Full Disk Access to Messages DB.",
         "Grant Automation permission for Messages when prompted.",
         "List chats with: imsg chats --limit 20",
-        `Docs: ${docsLink("/imessage", "imessage")}`,
+        `Docs: ${formatDocsLink("/imessage", "imessage")}`,
       ].join("\n"),
       "iMessage next steps",
     );
   }
 
-  next = await maybeConfigureDmPolicies({ cfg: next, selection, prompter });
+  if (!options?.skipDmPolicyPrompt) {
+    next = await maybeConfigureDmPolicies({ cfg: next, selection, prompter });
+  }
 
   if (options?.allowDisable) {
     if (!selection.includes("telegram") && telegramConfigured) {

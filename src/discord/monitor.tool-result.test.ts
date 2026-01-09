@@ -3,14 +3,26 @@ import { ChannelType, MessageType } from "@buape/carbon";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const sendMock = vi.fn();
+const reactMock = vi.fn();
 const updateLastRouteMock = vi.fn();
 const dispatchMock = vi.fn();
+const readAllowFromStoreMock = vi.fn();
+const upsertPairingRequestMock = vi.fn();
 
 vi.mock("./send.js", () => ({
   sendMessageDiscord: (...args: unknown[]) => sendMock(...args),
+  reactMessageDiscord: async (...args: unknown[]) => {
+    reactMock(...args);
+  },
 }));
 vi.mock("../auto-reply/reply/dispatch-from-config.js", () => ({
   dispatchReplyFromConfig: (...args: unknown[]) => dispatchMock(...args),
+}));
+vi.mock("../pairing/pairing-store.js", () => ({
+  readProviderAllowFromStore: (...args: unknown[]) =>
+    readAllowFromStoreMock(...args),
+  upsertProviderPairingRequest: (...args: unknown[]) =>
+    upsertPairingRequestMock(...args),
 }));
 vi.mock("../config/sessions.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../config/sessions.js")>();
@@ -29,6 +41,10 @@ beforeEach(() => {
     dispatcher.sendFinalReply({ text: "hi" });
     return { queuedFinal: true, counts: { final: 1 } };
   });
+  readAllowFromStoreMock.mockReset().mockResolvedValue([]);
+  upsertPairingRequestMock
+    .mockReset()
+    .mockResolvedValue({ code: "PAIRCODE", created: true });
   vi.resetModules();
 });
 
@@ -36,11 +52,15 @@ describe("discord tool result dispatch", () => {
   it("sends status replies with responsePrefix", async () => {
     const { createDiscordMessageHandler } = await import("./monitor.js");
     const cfg = {
-      agent: { model: "anthropic/claude-opus-4-5", workspace: "/tmp/clawd" },
+      agents: {
+        defaults: {
+          model: "anthropic/claude-opus-4-5",
+          workspace: "/tmp/clawd",
+        },
+      },
       session: { store: "/tmp/clawdbot-sessions.json" },
       messages: { responsePrefix: "PFX" },
       discord: { dm: { enabled: true, policy: "open" } },
-      routing: { allowFrom: [] },
     } as ReturnType<typeof import("../config/config.js").loadConfig>;
 
     const runtimeError = vi.fn();
@@ -99,18 +119,96 @@ describe("discord tool result dispatch", () => {
     expect(sendMock.mock.calls[0]?.[1]).toMatch(/^PFX /);
   }, 10000);
 
+  it("replies with pairing code and sender id when dmPolicy is pairing", async () => {
+    const { createDiscordMessageHandler } = await import("./monitor.js");
+    const cfg = {
+      agents: {
+        defaults: {
+          model: "anthropic/claude-opus-4-5",
+          workspace: "/tmp/clawd",
+        },
+      },
+      session: { store: "/tmp/clawdbot-sessions.json" },
+      discord: { dm: { enabled: true, policy: "pairing", allowFrom: [] } },
+    } as ReturnType<typeof import("../config/config.js").loadConfig>;
+
+    const handler = createDiscordMessageHandler({
+      cfg,
+      discordConfig: cfg.discord,
+      accountId: "default",
+      token: "token",
+      runtime: {
+        log: vi.fn(),
+        error: vi.fn(),
+        exit: (code: number): never => {
+          throw new Error(`exit ${code}`);
+        },
+      },
+      botUserId: "bot-id",
+      guildHistories: new Map(),
+      historyLimit: 0,
+      mediaMaxBytes: 10_000,
+      textLimit: 2000,
+      replyToMode: "off",
+      dmEnabled: true,
+      groupDmEnabled: false,
+    });
+
+    const client = {
+      fetchChannel: vi.fn().mockResolvedValue({
+        type: ChannelType.DM,
+        name: "dm",
+      }),
+    } as unknown as Client;
+
+    await handler(
+      {
+        message: {
+          id: "m1",
+          content: "hello",
+          channelId: "c1",
+          timestamp: new Date().toISOString(),
+          type: MessageType.Default,
+          attachments: [],
+          embeds: [],
+          mentionedEveryone: false,
+          mentionedUsers: [],
+          mentionedRoles: [],
+          author: { id: "u2", bot: false, username: "Ada" },
+        },
+        author: { id: "u2", bot: false, username: "Ada" },
+        guild_id: null,
+      },
+      client,
+    );
+
+    expect(dispatchMock).not.toHaveBeenCalled();
+    expect(upsertPairingRequestMock).toHaveBeenCalled();
+    expect(sendMock).toHaveBeenCalledTimes(1);
+    expect(String(sendMock.mock.calls[0]?.[1] ?? "")).toContain(
+      "Your Discord user id: u2",
+    );
+    expect(String(sendMock.mock.calls[0]?.[1] ?? "")).toContain(
+      "Pairing code: PAIRCODE",
+    );
+  }, 10000);
+
   it("accepts guild messages when mentionPatterns match", async () => {
     const { createDiscordMessageHandler } = await import("./monitor.js");
     const cfg = {
-      agent: { model: "anthropic/claude-opus-4-5", workspace: "/tmp/clawd" },
+      agents: {
+        defaults: {
+          model: "anthropic/claude-opus-4-5",
+          workspace: "/tmp/clawd",
+        },
+      },
       session: { store: "/tmp/clawdbot-sessions.json" },
-      messages: { responsePrefix: "PFX" },
       discord: {
         dm: { enabled: true, policy: "open" },
         guilds: { "*": { requireMention: true } },
       },
-      routing: {
-        allowFrom: [],
+      messages: {
+        responsePrefix: "PFX",
         groupChat: { mentionPatterns: ["\\bclawd\\b"] },
       },
     } as ReturnType<typeof import("../config/config.js").loadConfig>;
@@ -189,14 +287,18 @@ describe("discord tool result dispatch", () => {
     });
 
     const cfg = {
-      agent: { model: "anthropic/claude-opus-4-5", workspace: "/tmp/clawd" },
+      agents: {
+        defaults: {
+          model: "anthropic/claude-opus-4-5",
+          workspace: "/tmp/clawd",
+        },
+      },
       session: { store: "/tmp/clawdbot-sessions.json" },
       messages: { responsePrefix: "PFX" },
       discord: {
         dm: { enabled: true, policy: "open" },
         guilds: { "*": { requireMention: false } },
       },
-      routing: { allowFrom: [] },
     } as ReturnType<typeof import("../config/config.js").loadConfig>;
 
     const handler = createDiscordMessageHandler({
@@ -295,19 +397,21 @@ describe("discord tool result dispatch", () => {
     });
 
     const cfg = {
-      agent: { model: "anthropic/claude-opus-4-5", workspace: "/tmp/clawd" },
+      agents: {
+        defaults: {
+          model: "anthropic/claude-opus-4-5",
+          workspace: "/tmp/clawd",
+        },
+      },
       session: { store: "/tmp/clawdbot-sessions.json" },
       messages: { responsePrefix: "PFX" },
       discord: {
         dm: { enabled: true, policy: "open" },
         guilds: { "*": { requireMention: false } },
       },
-      routing: {
-        allowFrom: [],
-        bindings: [
-          { agentId: "support", match: { provider: "discord", guildId: "g1" } },
-        ],
-      },
+      bindings: [
+        { agentId: "support", match: { provider: "discord", guildId: "g1" } },
+      ],
     } as ReturnType<typeof import("../config/config.js").loadConfig>;
 
     const handler = createDiscordMessageHandler({

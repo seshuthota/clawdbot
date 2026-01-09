@@ -4,6 +4,7 @@ import {
   type SlackEventMiddlewareArgs,
 } from "@slack/bolt";
 import type { WebClient as SlackWebClient } from "@slack/web-api";
+import { resolveAckReaction } from "../agents/identity.js";
 import {
   chunkMarkdownText,
   resolveTextChunkLimit,
@@ -43,6 +44,7 @@ import { enqueueSystemEvent } from "../infra/system-events.js";
 import { getChildLogger } from "../logging.js";
 import { detectMime } from "../media/mime.js";
 import { saveMediaBuffer } from "../media/store.js";
+import { buildPairingReply } from "../pairing/pairing-messages.js";
 import {
   readProviderAllowFromStore,
   upsertProviderPairingRequest,
@@ -80,6 +82,7 @@ type SlackMessageEvent = {
   user?: string;
   bot_id?: string;
   subtype?: string;
+  username?: string;
   text?: string;
   ts?: string;
   thread_ts?: string;
@@ -93,6 +96,7 @@ type SlackAppMentionEvent = {
   type: "app_mention";
   user?: string;
   bot_id?: string;
+  username?: string;
   text?: string;
   ts?: string;
   thread_ts?: string;
@@ -170,6 +174,7 @@ type SlackThreadBroadcastEvent = {
 type SlackChannelConfigResolved = {
   allowed: boolean;
   requireMention: boolean;
+  allowBots?: boolean;
   users?: Array<string | number>;
   skills?: string[];
   systemPrompt?: string;
@@ -294,6 +299,7 @@ function resolveSlackChannelConfig(params: {
       enabled?: boolean;
       allow?: boolean;
       requireMention?: boolean;
+      allowBots?: boolean;
       users?: Array<string | number>;
       skills?: string[];
       systemPrompt?: string;
@@ -317,6 +323,7 @@ function resolveSlackChannelConfig(params: {
         enabled?: boolean;
         allow?: boolean;
         requireMention?: boolean;
+        allowBots?: boolean;
         users?: Array<string | number>;
         skills?: string[];
         systemPrompt?: string;
@@ -349,13 +356,14 @@ function resolveSlackChannelConfig(params: {
   const requireMention =
     firstDefined(resolved.requireMention, fallback?.requireMention, true) ??
     true;
+  const allowBots = firstDefined(resolved.allowBots, fallback?.allowBots);
   const users = firstDefined(resolved.users, fallback?.users);
   const skills = firstDefined(resolved.skills, fallback?.skills);
   const systemPrompt = firstDefined(
     resolved.systemPrompt,
     fallback?.systemPrompt,
   );
-  return { allowed, requireMention, users, skills, systemPrompt };
+  return { allowed, requireMention, allowBots, users, skills, systemPrompt };
 }
 
 async function resolveSlackMedia(params: {
@@ -502,8 +510,6 @@ export async function monitorSlackProvider(opts: MonitorSlackOpts = {}) {
     opts.slashCommand ?? slackCfg.slashCommand,
   );
   const textLimit = resolveTextChunkLimit(cfg, "slack", account.accountId);
-  const mentionRegexes = buildMentionRegexes(cfg);
-  const ackReaction = (cfg.messages?.ackReaction ?? "").trim();
   const ackReactionScope = cfg.messages?.ackReactionScope ?? "group-mentions";
   const mediaMaxBytes =
     (opts.mediaMaxMb ?? slackCfg.mediaMaxMb ?? 20) * 1024 * 1024;
@@ -706,15 +712,14 @@ export async function monitorSlackProvider(opts: MonitorSlackOpts = {}) {
     opts: { source: "message" | "app_mention"; wasMentioned?: boolean },
   ) => {
     if (opts.source === "message" && message.type !== "message") return;
-    if (message.bot_id) return;
     if (
       opts.source === "message" &&
       message.subtype &&
-      message.subtype !== "file_share"
+      message.subtype !== "file_share" &&
+      message.subtype !== "bot_message"
     ) {
       return;
     }
-    if (!message.user) return;
     if (markMessageSeen(message.channel, message.ts)) return;
 
     let channelInfo: {
@@ -734,6 +739,40 @@ export async function monitorSlackProvider(opts: MonitorSlackOpts = {}) {
     const isGroupDm = resolvedChannelType === "mpim";
     const isRoom =
       resolvedChannelType === "channel" || resolvedChannelType === "group";
+
+    const channelConfig = isRoom
+      ? resolveSlackChannelConfig({
+          channelId: message.channel,
+          channelName,
+          channels: channelsConfig,
+        })
+      : null;
+
+    const allowBots =
+      channelConfig?.allowBots ??
+      account.config?.allowBots ??
+      cfg.slack?.allowBots ??
+      false;
+    const isBotMessage = Boolean(message.bot_id);
+    if (isBotMessage) {
+      if (message.user && botUserId && message.user === botUserId) return;
+      if (!allowBots) {
+        logVerbose(
+          `slack: drop bot message ${message.bot_id ?? "unknown"} (allowBots=false)`,
+        );
+        return;
+      }
+    }
+    if (isDirectMessage && !message.user) {
+      logVerbose("slack: drop dm message (missing user id)");
+      return;
+    }
+    const senderId =
+      message.user ?? (isBotMessage ? message.bot_id : undefined);
+    if (!senderId) {
+      logVerbose("slack: drop message (missing sender id)");
+      return;
+    }
 
     if (
       !isChannelAllowed({
@@ -756,6 +795,11 @@ export async function monitorSlackProvider(opts: MonitorSlackOpts = {}) {
     const effectiveAllowFromLower = normalizeAllowListLower(effectiveAllowFrom);
 
     if (isDirectMessage) {
+      const directUserId = message.user;
+      if (!directUserId) {
+        logVerbose("slack: drop dm message (missing user id)");
+        return;
+      }
       if (!dmEnabled || dmPolicy === "disabled") {
         logVerbose("slack: drop dm (dms disabled)");
         return;
@@ -763,32 +807,29 @@ export async function monitorSlackProvider(opts: MonitorSlackOpts = {}) {
       if (dmPolicy !== "open") {
         const permitted = allowListMatches({
           allowList: effectiveAllowFromLower,
-          id: message.user,
+          id: directUserId,
         });
         if (!permitted) {
           if (dmPolicy === "pairing") {
-            const sender = await resolveUserName(message.user);
+            const sender = await resolveUserName(directUserId);
             const senderName = sender?.name ?? undefined;
             const { code, created } = await upsertProviderPairingRequest({
               provider: "slack",
-              id: message.user,
+              id: directUserId,
               meta: { name: senderName },
             });
             if (created) {
               logVerbose(
-                `slack pairing request sender=${message.user} name=${senderName ?? "unknown"}`,
+                `slack pairing request sender=${directUserId} name=${senderName ?? "unknown"}`,
               );
               try {
                 await sendMessageSlack(
                   message.channel,
-                  [
-                    "Clawdbot: access not configured.",
-                    "",
-                    `Pairing code: ${code}`,
-                    "",
-                    "Ask the bot owner to approve with:",
-                    "clawdbot pairing approve --provider slack <code>",
-                  ].join("\n"),
+                  buildPairingReply({
+                    provider: "slack",
+                    idLine: `Your Slack user id: ${directUserId}`,
+                    code,
+                  }),
                   {
                     token: botToken,
                     client: app.client,
@@ -811,31 +852,39 @@ export async function monitorSlackProvider(opts: MonitorSlackOpts = {}) {
       }
     }
 
-    const channelConfig = isRoom
-      ? resolveSlackChannelConfig({
-          channelId: message.channel,
-          channelName,
-          channels: channelsConfig,
-        })
-      : null;
-
+    const route = resolveAgentRoute({
+      cfg,
+      provider: "slack",
+      accountId: account.accountId,
+      teamId: teamId || undefined,
+      peer: {
+        kind: isDirectMessage ? "dm" : isRoom ? "channel" : "group",
+        id: isDirectMessage ? (message.user ?? "unknown") : message.channel,
+      },
+    });
+    const mentionRegexes = buildMentionRegexes(cfg, route.agentId);
     const wasMentioned =
       opts.wasMentioned ??
       (!isDirectMessage &&
         (Boolean(botUserId && message.text?.includes(`<@${botUserId}>`)) ||
           matchesMentionPatterns(message.text ?? "", mentionRegexes)));
-    const sender = await resolveUserName(message.user);
-    const senderName = sender?.name ?? message.user;
+    const sender = message.user ? await resolveUserName(message.user) : null;
+    const senderName =
+      sender?.name ??
+      message.username?.trim() ??
+      message.user ??
+      message.bot_id ??
+      "unknown";
     const channelUserAuthorized = isRoom
       ? resolveSlackUserAllowed({
           allowList: channelConfig?.users,
-          userId: message.user,
+          userId: senderId,
           userName: senderName,
         })
       : true;
     if (isRoom && !channelUserAuthorized) {
       logVerbose(
-        `Blocked unauthorized slack sender ${message.user} (not in channel users)`,
+        `Blocked unauthorized slack sender ${senderId} (not in channel users)`,
       );
       return;
     }
@@ -844,7 +893,7 @@ export async function monitorSlackProvider(opts: MonitorSlackOpts = {}) {
       (allowList.length === 0 ||
         allowListMatches({
           allowList,
-          id: message.user,
+          id: senderId,
           name: senderName,
         })) &&
       channelUserAuthorized;
@@ -864,6 +913,7 @@ export async function monitorSlackProvider(opts: MonitorSlackOpts = {}) {
       !hasAnyMention &&
       commandAuthorized &&
       hasControlCommand(message.text ?? "");
+    const effectiveWasMentioned = wasMentioned || shouldBypassMention;
     const canDetectMention = Boolean(botUserId) || mentionRegexes.length > 0;
     if (
       isRoom &&
@@ -886,6 +936,7 @@ export async function monitorSlackProvider(opts: MonitorSlackOpts = {}) {
     });
     const rawBody = (message.text ?? "").trim() || media?.placeholder || "";
     if (!rawBody) return;
+    const ackReaction = resolveAckReaction(cfg, route.agentId);
     const shouldAckReaction = () => {
       if (!ackReaction) return false;
       if (ackReactionScope === "all") return true;
@@ -922,16 +973,6 @@ export async function monitorSlackProvider(opts: MonitorSlackOpts = {}) {
       : isRoom
         ? `slack:channel:${message.channel}`
         : `slack:group:${message.channel}`;
-    const route = resolveAgentRoute({
-      cfg,
-      provider: "slack",
-      accountId: account.accountId,
-      teamId: teamId || undefined,
-      peer: {
-        kind: isDirectMessage ? "dm" : isRoom ? "channel" : "group",
-        id: isDirectMessage ? (message.user ?? "unknown") : message.channel,
-      },
-    });
     const baseSessionKey = route.sessionKey;
     const threadTs = message.thread_ts;
     const hasThreadTs = typeof threadTs === "string" && threadTs.length > 0;
@@ -1010,7 +1051,7 @@ export async function monitorSlackProvider(opts: MonitorSlackOpts = {}) {
       GroupSubject: isRoomish ? roomLabel : undefined,
       GroupSystemPrompt: isRoomish ? groupSystemPrompt : undefined,
       SenderName: senderName,
-      SenderId: message.user,
+      SenderId: senderId,
       Provider: "slack" as const,
       Surface: "slack" as const,
       MessageSid: message.ts,
@@ -1019,7 +1060,7 @@ export async function monitorSlackProvider(opts: MonitorSlackOpts = {}) {
       ThreadStarterBody: threadStarterBody,
       ThreadLabel: threadLabel,
       Timestamp: message.ts ? Math.round(Number(message.ts) * 1000) : undefined,
-      WasMentioned: isRoomish ? wasMentioned : undefined,
+      WasMentioned: isRoomish ? effectiveWasMentioned : undefined,
       MediaPath: media?.path,
       MediaType: media?.contentType,
       MediaUrl: media?.path,
@@ -1676,14 +1717,11 @@ export async function monitorSlackProvider(opts: MonitorSlackOpts = {}) {
               });
               if (created) {
                 await respond({
-                  text: [
-                    "Clawdbot: access not configured.",
-                    "",
-                    `Pairing code: ${code}`,
-                    "",
-                    "Ask the bot owner to approve with:",
-                    "clawdbot pairing approve --provider slack <code>",
-                  ].join("\n"),
+                  text: buildPairingReply({
+                    provider: "slack",
+                    idLine: `Your Slack user id: ${command.user_id}`,
+                    code,
+                  }),
                   response_type: "ephemeral",
                 });
               }

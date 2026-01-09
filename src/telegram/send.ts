@@ -1,14 +1,20 @@
 import type { ReactionType, ReactionTypeEmoji } from "@grammyjs/types";
-import { Bot, InputFile } from "grammy";
+import { type ApiClientOptions, Bot, InputFile } from "grammy";
 import { loadConfig } from "../config/config.js";
 import { formatErrorMessage } from "../infra/errors.js";
+import { recordProviderActivity } from "../infra/provider-activity.js";
 import type { RetryConfig } from "../infra/retry.js";
 import { createTelegramRetryRunner } from "../infra/retry-policy.js";
 import { mediaKindFromMime } from "../media/constants.js";
 import { isGifMedia } from "../media/mime.js";
 import { loadWebMedia } from "../web/media.js";
 import { resolveTelegramAccount } from "./accounts.js";
+import { resolveTelegramFetch } from "./fetch.js";
 import { markdownToTelegramHtml } from "./format.js";
+import {
+  parseTelegramTarget,
+  stripTelegramInternalPrefixes,
+} from "./targets.js";
 
 type TelegramSendOpts = {
   token?: string;
@@ -63,7 +69,7 @@ function normalizeChatId(to: string): string {
   // Common internal prefixes that sometimes leak into outbound sends.
   // - ctx.To uses `telegram:<id>`
   // - group sessions often use `telegram:group:<id>`
-  let normalized = trimmed.replace(/^(telegram|tg|group):/i, "").trim();
+  let normalized = stripTelegramInternalPrefixes(trimmed);
 
   // Accept t.me links for public chats/channels.
   // (Invite links like `t.me/+...` are not resolvable via Bot API.)
@@ -108,17 +114,26 @@ export async function sendMessageTelegram(
     accountId: opts.accountId,
   });
   const token = resolveToken(opts.token, account);
-  const chatId = normalizeChatId(to);
+  const target = parseTelegramTarget(to);
+  const chatId = normalizeChatId(target.chatId);
   // Use provided api or create a new Bot instance. The nullish coalescing
   // operator ensures api is always defined (Bot.api is always non-null).
-  const api = opts.api ?? new Bot(token).api;
+  const fetchImpl = resolveTelegramFetch();
+  const client: ApiClientOptions | undefined = fetchImpl
+    ? { fetch: fetchImpl as unknown as ApiClientOptions["fetch"] }
+    : undefined;
+  const api = opts.api ?? new Bot(token, client ? { client } : undefined).api;
   const mediaUrl = opts.mediaUrl?.trim();
 
   // Build optional params for forum topics and reply threading.
   // Only include these if actually provided to keep API calls clean.
   const threadParams: Record<string, number> = {};
-  if (opts.messageThreadId != null) {
-    threadParams.message_thread_id = Math.trunc(opts.messageThreadId);
+  const messageThreadId =
+    opts.messageThreadId != null
+      ? opts.messageThreadId
+      : target.messageThreadId;
+  if (messageThreadId != null) {
+    threadParams.message_thread_id = Math.trunc(messageThreadId);
   }
   if (opts.replyToMessageId != null) {
     threadParams.reply_to_message_id = Math.trunc(opts.replyToMessageId);
@@ -212,6 +227,11 @@ export async function sendMessageTelegram(
       });
     }
     const messageId = String(result?.message_id ?? "unknown");
+    recordProviderActivity({
+      provider: "telegram",
+      accountId: account.accountId,
+      direction: "outbound",
+    });
     return { messageId, chatId: String(result?.chat?.id ?? chatId) };
   }
 
@@ -248,6 +268,11 @@ export async function sendMessageTelegram(
     throw wrapChatNotFound(err);
   });
   const messageId = String(res?.message_id ?? "unknown");
+  recordProviderActivity({
+    provider: "telegram",
+    accountId: account.accountId,
+    direction: "outbound",
+  });
   return { messageId, chatId: String(res?.chat?.id ?? chatId) };
 }
 
@@ -265,7 +290,11 @@ export async function reactMessageTelegram(
   const token = resolveToken(opts.token, account);
   const chatId = normalizeChatId(String(chatIdInput));
   const messageId = normalizeMessageId(messageIdInput);
-  const api = opts.api ?? new Bot(token).api;
+  const fetchImpl = resolveTelegramFetch();
+  const client: ApiClientOptions | undefined = fetchImpl
+    ? { fetch: fetchImpl as unknown as ApiClientOptions["fetch"] }
+    : undefined;
+  const api = opts.api ?? new Bot(token, client ? { client } : undefined).api;
   const request = createTelegramRetryRunner({
     retry: opts.retry,
     configRetry: account.config.retry,

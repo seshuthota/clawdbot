@@ -35,11 +35,16 @@ import {
   listChatCommands,
   shouldHandleTextCommands,
 } from "./commands-registry.js";
+import { buildInboundMediaNote } from "./media-note.js";
 import { getAbortMemory } from "./reply/abort.js";
 import { runReplyAgent } from "./reply/agent-runner.js";
 import { resolveBlockStreamingChunking } from "./reply/block-streaming.js";
 import { applySessionHints } from "./reply/body.js";
-import { buildCommandContext, handleCommands } from "./reply/commands.js";
+import {
+  buildCommandContext,
+  buildStatusReply,
+  handleCommands,
+} from "./reply/commands.js";
 import {
   handleDirectiveOnly,
   type InlineDirectives,
@@ -207,7 +212,7 @@ export async function getReplyFromConfig(
 ): Promise<ReplyPayload | ReplyPayload[] | undefined> {
   const cfg = configOverride ?? loadConfig();
   const agentId = resolveAgentIdFromSessionKey(ctx.SessionKey);
-  const agentCfg = cfg.agent;
+  const agentCfg = cfg.agents?.defaults;
   const sessionCfg = cfg.session;
   const { defaultProvider, defaultModel, aliasIndex } = resolveDefaultModel({
     cfg,
@@ -234,7 +239,7 @@ export async function getReplyFromConfig(
     resolveAgentWorkspaceDir(cfg, agentId) ?? DEFAULT_AGENT_WORKSPACE_DIR;
   const workspace = await ensureAgentWorkspace({
     dir: workspaceDirRaw,
-    ensureBootstrapFiles: !cfg.agent?.skipBootstrap,
+    ensureBootstrapFiles: !agentCfg?.skipBootstrap,
   });
   const workspaceDir = workspace.dir;
   const agentDir = resolveAgentDir(cfg, agentId);
@@ -252,7 +257,7 @@ export async function getReplyFromConfig(
   opts?.onTypingController?.(typing);
 
   let transcribedText: string | undefined;
-  if (cfg.routing?.transcribeAudio && isAudio(ctx.MediaType)) {
+  if (cfg.audio?.transcription && isAudio(ctx.MediaType)) {
     const transcribed = await transcribeInboundAudio(cfg, ctx, defaultRuntime);
     if (transcribed?.text) {
       transcribedText = transcribed.text;
@@ -324,13 +329,27 @@ export async function getReplyFromConfig(
       cmd.textAliases.map((a) => a.replace(/^\//, "").toLowerCase()),
     ),
   );
-  const configuredAliases = Object.values(cfg.agent?.models ?? {})
+  const configuredAliases = Object.values(cfg.agents?.defaults?.models ?? {})
     .map((entry) => entry.alias?.trim())
     .filter((alias): alias is string => Boolean(alias))
     .filter((alias) => !reservedCommands.has(alias.toLowerCase()));
   let parsedDirectives = parseInlineDirectives(rawBody, {
     modelAliases: configuredAliases,
   });
+  if (
+    isGroup &&
+    ctx.WasMentioned !== true &&
+    parsedDirectives.hasElevatedDirective
+  ) {
+    if (parsedDirectives.elevatedLevel !== "off") {
+      parsedDirectives = {
+        ...parsedDirectives,
+        hasElevatedDirective: false,
+        elevatedLevel: undefined,
+        rawElevatedLevel: undefined,
+      };
+    }
+  }
   const hasDirective =
     parsedDirectives.hasThinkDirective ||
     parsedDirectives.hasVerboseDirective ||
@@ -341,9 +360,16 @@ export async function getReplyFromConfig(
     parsedDirectives.hasQueueDirective;
   if (hasDirective) {
     const stripped = stripStructuralPrefixes(parsedDirectives.cleaned);
-    const noMentions = isGroup ? stripMentions(stripped, ctx, cfg) : stripped;
+    const noMentions = isGroup
+      ? stripMentions(stripped, ctx, cfg, agentId)
+      : stripped;
     if (noMentions.trim().length > 0) {
-      parsedDirectives = clearInlineDirectives(parsedDirectives.cleaned);
+      const directiveOnlyCheck = parseInlineDirectives(noMentions, {
+        modelAliases: configuredAliases,
+      });
+      if (directiveOnlyCheck.cleaned.trim().length > 0) {
+        parsedDirectives = clearInlineDirectives(parsedDirectives.cleaned);
+      }
     }
   }
   const directives = commandAuthorized
@@ -365,7 +391,7 @@ export async function getReplyFromConfig(
     sessionCtx.Provider?.trim().toLowerCase() ??
     ctx.Provider?.trim().toLowerCase() ??
     "";
-  const elevatedConfig = agentCfg?.elevated;
+  const elevatedConfig = cfg.tools?.elevated;
   const discordElevatedFallback =
     messageProviderKey === "discord" ? cfg.discord?.dm?.allowFrom : undefined;
   const elevatedEnabled = elevatedConfig?.enabled !== false;
@@ -460,12 +486,28 @@ export async function getReplyFromConfig(
     ? undefined
     : directives.rawModelDirective;
 
+  const command = buildCommandContext({
+    ctx,
+    cfg,
+    agentId,
+    sessionKey,
+    isGroup,
+    triggerBodyNormalized,
+    commandAuthorized,
+  });
+  const allowTextCommands = shouldHandleTextCommands({
+    cfg,
+    surface: command.surface,
+    commandSource: ctx.CommandSource,
+  });
+
   if (
     isDirectiveOnly({
       directives,
       cleanedBody: directives.cleaned,
       ctx,
       cfg,
+      agentId,
       isGroup,
     })
   ) {
@@ -504,8 +546,36 @@ export async function getReplyFromConfig(
       currentReasoningLevel,
       currentElevatedLevel,
     });
+    let statusReply: ReplyPayload | undefined;
+    if (directives.hasStatusDirective && allowTextCommands) {
+      statusReply = await buildStatusReply({
+        cfg,
+        command,
+        sessionEntry,
+        sessionKey,
+        sessionScope,
+        provider,
+        model,
+        contextTokens,
+        resolvedThinkLevel:
+          currentThinkLevel ??
+          (agentCfg?.thinkingDefault as ThinkLevel | undefined),
+        resolvedVerboseLevel: (currentVerboseLevel ?? "off") as VerboseLevel,
+        resolvedReasoningLevel: (currentReasoningLevel ??
+          "off") as ReasoningLevel,
+        resolvedElevatedLevel: currentElevatedLevel,
+        resolveDefaultThinkingLevel: async () =>
+          currentThinkLevel ??
+          (agentCfg?.thinkingDefault as ThinkLevel | undefined),
+        isGroup,
+        defaultGroupActivation: () => defaultActivation,
+      });
+    }
     typing.cleanup();
-    return directiveReply;
+    if (statusReply?.text && directiveReply?.text) {
+      return { text: `${directiveReply.text}\n${statusReply.text}` };
+    }
+    return statusReply ?? directiveReply;
   }
 
   const persisted = await persistInlineDirectives({
@@ -545,19 +615,6 @@ export async function getReplyFromConfig(
         }
       : undefined;
 
-  const command = buildCommandContext({
-    ctx,
-    cfg,
-    sessionKey,
-    isGroup,
-    triggerBodyNormalized,
-    commandAuthorized,
-  });
-  const allowTextCommands = shouldHandleTextCommands({
-    cfg,
-    surface: command.surface,
-    commandSource: ctx.CommandSource,
-  });
   const isEmptyConfig = Object.keys(cfg).length === 0;
   if (
     command.isWhatsAppProvider &&
@@ -578,6 +635,7 @@ export async function getReplyFromConfig(
     ctx,
     cfg,
     command,
+    agentId,
     directives,
     sessionEntry,
     sessionStore,
@@ -713,9 +771,7 @@ export async function getReplyFromConfig(
         .filter(Boolean)
         .join("\n\n")
     : [threadStarterNote, prefixedBodyBase].filter(Boolean).join("\n\n");
-  const mediaNote = ctx.MediaPath?.length
-    ? `[media attached: ${ctx.MediaPath}${ctx.MediaType ? ` (${ctx.MediaType})` : ""}${ctx.MediaUrl ? ` | ${ctx.MediaUrl}` : ""}]`
-    : undefined;
+  const mediaNote = buildInboundMediaNote(ctx);
   const mediaReplyHint = mediaNote
     ? "To send an image back, add a line like: MEDIA:https://example.com/image.jpg (no spaces). Keep caption in the text body."
     : undefined;
@@ -792,6 +848,7 @@ export async function getReplyFromConfig(
       sessionId: sessionIdFinal,
       sessionKey,
       messageProvider: sessionCtx.Provider?.trim().toLowerCase() || undefined,
+      agentAccountId: sessionCtx.AccountId,
       sessionFile,
       workspaceDir,
       config: cfg,
@@ -857,8 +914,18 @@ async function stageSandboxMedia(params: {
   workspaceDir: string;
 }) {
   const { ctx, sessionCtx, cfg, sessionKey, workspaceDir } = params;
-  const rawPath = ctx.MediaPath?.trim();
-  if (!rawPath || !sessionKey) return;
+  const hasPathsArray =
+    Array.isArray(ctx.MediaPaths) && ctx.MediaPaths.length > 0;
+  const pathsFromArray = Array.isArray(ctx.MediaPaths)
+    ? ctx.MediaPaths
+    : undefined;
+  const rawPaths =
+    pathsFromArray && pathsFromArray.length > 0
+      ? pathsFromArray
+      : ctx.MediaPath?.trim()
+        ? [ctx.MediaPath.trim()]
+        : [];
+  if (rawPaths.length === 0 || !sessionKey) return;
 
   const sandbox = await ensureSandboxWorkspaceForSession({
     config: cfg,
@@ -867,44 +934,83 @@ async function stageSandboxMedia(params: {
   });
   if (!sandbox) return;
 
-  let source = rawPath;
-  if (source.startsWith("file://")) {
-    try {
-      source = fileURLToPath(source);
-    } catch {
-      return;
+  const resolveAbsolutePath = (value: string): string | null => {
+    let resolved = value.trim();
+    if (!resolved) return null;
+    if (resolved.startsWith("file://")) {
+      try {
+        resolved = fileURLToPath(resolved);
+      } catch {
+        return null;
+      }
     }
-  }
-  if (!path.isAbsolute(source)) return;
-
-  const originalMediaPath = ctx.MediaPath;
-  const originalMediaUrl = ctx.MediaUrl;
+    if (!path.isAbsolute(resolved)) return null;
+    return resolved;
+  };
 
   try {
-    const fileName = path.basename(source);
-    if (!fileName) return;
     const destDir = path.join(sandbox.workspaceDir, "media", "inbound");
     await fs.mkdir(destDir, { recursive: true });
-    const dest = path.join(destDir, fileName);
-    await fs.copyFile(source, dest);
 
-    const relative = path.posix.join("media", "inbound", fileName);
-    ctx.MediaPath = relative;
-    sessionCtx.MediaPath = relative;
+    const usedNames = new Set<string>();
+    const staged = new Map<string, string>(); // absolute source -> relative sandbox path
 
-    if (originalMediaUrl) {
-      let normalizedUrl = originalMediaUrl;
-      if (normalizedUrl.startsWith("file://")) {
-        try {
-          normalizedUrl = fileURLToPath(normalizedUrl);
-        } catch {
-          normalizedUrl = originalMediaUrl;
-        }
+    for (const raw of rawPaths) {
+      const source = resolveAbsolutePath(raw);
+      if (!source) continue;
+      if (staged.has(source)) continue;
+
+      const baseName = path.basename(source);
+      if (!baseName) continue;
+      const parsed = path.parse(baseName);
+      let fileName = baseName;
+      let suffix = 1;
+      while (usedNames.has(fileName)) {
+        fileName = `${parsed.name}-${suffix}${parsed.ext}`;
+        suffix += 1;
       }
-      if (normalizedUrl === originalMediaPath || normalizedUrl === source) {
-        ctx.MediaUrl = relative;
-        sessionCtx.MediaUrl = relative;
+      usedNames.add(fileName);
+
+      const dest = path.join(destDir, fileName);
+      await fs.copyFile(source, dest);
+      const relative = path.posix.join("media", "inbound", fileName);
+      staged.set(source, relative);
+    }
+
+    const rewriteIfStaged = (value: string | undefined): string | undefined => {
+      const raw = value?.trim();
+      if (!raw) return value;
+      const abs = resolveAbsolutePath(raw);
+      if (!abs) return value;
+      const mapped = staged.get(abs);
+      return mapped ?? value;
+    };
+
+    const nextMediaPaths = hasPathsArray
+      ? rawPaths.map((p) => rewriteIfStaged(p) ?? p)
+      : undefined;
+    if (nextMediaPaths) {
+      ctx.MediaPaths = nextMediaPaths;
+      sessionCtx.MediaPaths = nextMediaPaths;
+      ctx.MediaPath = nextMediaPaths[0];
+      sessionCtx.MediaPath = nextMediaPaths[0];
+    } else {
+      const rewritten = rewriteIfStaged(ctx.MediaPath);
+      if (rewritten && rewritten !== ctx.MediaPath) {
+        ctx.MediaPath = rewritten;
+        sessionCtx.MediaPath = rewritten;
       }
+    }
+
+    if (Array.isArray(ctx.MediaUrls) && ctx.MediaUrls.length > 0) {
+      const nextUrls = ctx.MediaUrls.map((u) => rewriteIfStaged(u) ?? u);
+      ctx.MediaUrls = nextUrls;
+      sessionCtx.MediaUrls = nextUrls;
+    }
+    const rewrittenUrl = rewriteIfStaged(ctx.MediaUrl);
+    if (rewrittenUrl && rewrittenUrl !== ctx.MediaUrl) {
+      ctx.MediaUrl = rewrittenUrl;
+      sessionCtx.MediaUrl = rewrittenUrl;
     }
   } catch (err) {
     logVerbose(`Failed to stage inbound media for sandbox: ${String(err)}`);

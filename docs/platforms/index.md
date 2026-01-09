@@ -9,7 +9,8 @@ read_when:
 Clawdbot core is written in TypeScript, so the CLI + Gateway run anywhere Node or Bun runs.
 
 Companion apps exist for macOS (menu bar app) and mobile nodes (iOS/Android). Windows and
-Linux companion apps are planned, but the core Gateway is fully supported today.
+Linux companion apps are planned, but the Gateway is fully supported today.
+Native companion apps for Windows are also planned; the Gateway is recommended via WSL2.
 
 ## Choose your OS
 
@@ -31,7 +32,7 @@ Linux companion apps are planned, but the core Gateway is fully supported today.
 Use one of these (all supported):
 
 - Wizard (recommended): `clawdbot onboard --install-daemon`
-- Direct: `clawdbot daemon install` (alias: `clawdbot gateway install`)
+- Direct: `clawdbot daemon install`
 - Configure flow: `clawdbot configure` → select **Gateway daemon**
 - Repair/migrate: `clawdbot doctor` (offers to install or fix the service)
 

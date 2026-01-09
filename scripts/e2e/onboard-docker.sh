@@ -42,7 +42,7 @@ TRASH
   }
 
   start_gateway() {
-    node dist/index.js gateway-daemon --port 18789 --bind loopback > /tmp/gateway-e2e.log 2>&1 &
+    node dist/index.js gateway --port 18789 --bind loopback > /tmp/gateway-e2e.log 2>&1 &
     GATEWAY_PID="$!"
   }
 
@@ -231,8 +231,10 @@ const cfg = JSON5.parse(fs.readFileSync(process.env.CONFIG_PATH, "utf-8"));
 const expectedWorkspace = process.env.WORKSPACE_DIR;
 const errors = [];
 
-if (cfg?.agent?.workspace !== expectedWorkspace) {
-  errors.push(`agent.workspace mismatch (got ${cfg?.agent?.workspace ?? "unset"})`);
+if (cfg?.agents?.defaults?.workspace !== expectedWorkspace) {
+  errors.push(
+    `agents.defaults.workspace mismatch (got ${cfg?.agents?.defaults?.workspace ?? "unset"})`,
+  );
 }
 if (cfg?.gateway?.mode !== "local") {
   errors.push(`gateway.mode mismatch (got ${cfg?.gateway?.mode ?? "unset"})`);
@@ -268,7 +270,7 @@ if (errors.length > 0) {
 }
 NODE
 
-    node dist/index.js gateway-daemon --port 18789 --bind loopback > /tmp/gateway.log 2>&1 &
+    node dist/index.js gateway --port 18789 --bind loopback > /tmp/gateway.log 2>&1 &
     GW_PID=$!
     # Gate on gateway readiness, then run health.
     for _ in $(seq 1 10); do

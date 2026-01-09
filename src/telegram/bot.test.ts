@@ -4,6 +4,7 @@ import path from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import * as replyModule from "../auto-reply/reply.js";
 import { createTelegramBot, getTelegramSequentialKey } from "./bot.js";
+import { resolveTelegramFetch } from "./fetch.js";
 
 const { loadWebMedia } = vi.hoisted(() => ({
   loadWebMedia: vi.fn(),
@@ -44,6 +45,7 @@ const middlewareUseSpy = vi.fn();
 const onSpy = vi.fn();
 const stopSpy = vi.fn();
 const commandSpy = vi.fn();
+const botCtorSpy = vi.fn();
 const sendChatActionSpy = vi.fn();
 const setMessageReactionSpy = vi.fn(async () => undefined);
 const setMyCommandsSpy = vi.fn(async () => undefined);
@@ -76,7 +78,12 @@ vi.mock("grammy", () => ({
     on = onSpy;
     stop = stopSpy;
     command = commandSpy;
-    constructor(public token: string) {}
+    constructor(
+      public token: string,
+      public options?: { client?: { fetch?: typeof fetch } },
+    ) {
+      botCtorSpy(token, options);
+    }
   },
   InputFile: class {},
   webhookCallback: vi.fn(),
@@ -118,6 +125,7 @@ describe("createTelegramBot", () => {
     setMyCommandsSpy.mockReset();
     middlewareUseSpy.mockReset();
     sequentializeSpy.mockReset();
+    botCtorSpy.mockReset();
     sequentializeKey = undefined;
   });
 
@@ -125,6 +133,55 @@ describe("createTelegramBot", () => {
     createTelegramBot({ token: "tok" });
     expect(throttlerSpy).toHaveBeenCalledTimes(1);
     expect(useSpy).toHaveBeenCalledWith("throttler");
+  });
+
+  it("forces native fetch only under Bun", () => {
+    const originalFetch = globalThis.fetch;
+    const originalBun = (globalThis as { Bun?: unknown }).Bun;
+    const fetchSpy = vi.fn() as unknown as typeof fetch;
+    globalThis.fetch = fetchSpy;
+    try {
+      (globalThis as { Bun?: unknown }).Bun = {};
+      createTelegramBot({ token: "tok" });
+      const fetchImpl = resolveTelegramFetch();
+      expect(fetchImpl).toBe(fetchSpy);
+      expect(botCtorSpy).toHaveBeenCalledWith(
+        "tok",
+        expect.objectContaining({
+          client: expect.objectContaining({ fetch: fetchSpy }),
+        }),
+      );
+    } finally {
+      globalThis.fetch = originalFetch;
+      if (originalBun === undefined) {
+        delete (globalThis as { Bun?: unknown }).Bun;
+      } else {
+        (globalThis as { Bun?: unknown }).Bun = originalBun;
+      }
+    }
+  });
+
+  it("does not force native fetch on Node", () => {
+    const originalFetch = globalThis.fetch;
+    const originalBun = (globalThis as { Bun?: unknown }).Bun;
+    const fetchSpy = vi.fn() as unknown as typeof fetch;
+    globalThis.fetch = fetchSpy;
+    try {
+      if (originalBun !== undefined) {
+        delete (globalThis as { Bun?: unknown }).Bun;
+      }
+      createTelegramBot({ token: "tok" });
+      const fetchImpl = resolveTelegramFetch();
+      expect(fetchImpl).toBeUndefined();
+      expect(botCtorSpy).toHaveBeenCalledWith("tok", undefined);
+    } finally {
+      globalThis.fetch = originalFetch;
+      if (originalBun === undefined) {
+        delete (globalThis as { Bun?: unknown }).Bun;
+      } else {
+        (globalThis as { Bun?: unknown }).Bun = originalBun;
+      }
+    }
   });
 
   it("sequentializes updates by chat and thread", () => {
@@ -228,6 +285,9 @@ describe("createTelegramBot", () => {
     expect(sendMessageSpy).toHaveBeenCalledTimes(1);
     expect(sendMessageSpy.mock.calls[0]?.[0]).toBe(1234);
     expect(String(sendMessageSpy.mock.calls[0]?.[1])).toContain(
+      "Your Telegram user id: 999",
+    );
+    expect(String(sendMessageSpy.mock.calls[0]?.[1])).toContain(
       "Pairing code:",
     );
     expect(String(sendMessageSpy.mock.calls[0]?.[1])).toContain("PAIRME12");
@@ -300,7 +360,7 @@ describe("createTelegramBot", () => {
 
     loadConfig.mockReturnValue({
       identity: { name: "Bert" },
-      routing: { groupChat: { mentionPatterns: ["\\bbert\\b"] } },
+      messages: { groupChat: { mentionPatterns: ["\\bbert\\b"] } },
       telegram: { groups: { "*": { requireMention: true } } },
     });
 
@@ -378,8 +438,11 @@ describe("createTelegramBot", () => {
     replySpy.mockReset();
 
     loadConfig.mockReturnValue({
-      messages: { ackReaction: "👀", ackReactionScope: "group-mentions" },
-      routing: { groupChat: { mentionPatterns: ["\\bbert\\b"] } },
+      messages: {
+        ackReaction: "👀",
+        ackReactionScope: "group-mentions",
+        groupChat: { mentionPatterns: ["\\bbert\\b"] },
+      },
       telegram: { groups: { "*": { requireMention: true } } },
     });
 
@@ -423,7 +486,7 @@ describe("createTelegramBot", () => {
     replySpy.mockReset();
 
     loadConfig.mockReturnValue({
-      routing: { groupChat: { mentionPatterns: ["\\bbert\\b"] } },
+      messages: { groupChat: { mentionPatterns: ["\\bbert\\b"] } },
       telegram: { groups: { "*": { requireMention: true } } },
     });
 
@@ -455,7 +518,7 @@ describe("createTelegramBot", () => {
     replySpy.mockReset();
 
     loadConfig.mockReturnValue({
-      routing: { groupChat: { mentionPatterns: [] } },
+      messages: { groupChat: { mentionPatterns: [] } },
       telegram: { groups: { "*": { requireMention: true } } },
     });
 
@@ -730,17 +793,15 @@ describe("createTelegramBot", () => {
     );
     loadConfig.mockReturnValue({
       telegram: { groups: { "*": { requireMention: true } } },
-      routing: {
-        bindings: [
-          {
-            agentId: "ops",
-            match: {
-              provider: "telegram",
-              peer: { kind: "group", id: "123" },
-            },
+      bindings: [
+        {
+          agentId: "ops",
+          match: {
+            provider: "telegram",
+            peer: { kind: "group", id: "123" },
           },
-        ],
-      },
+        },
+      ],
       session: { store: storePath },
     });
 

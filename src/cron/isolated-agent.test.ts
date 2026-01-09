@@ -63,9 +63,11 @@ function makeCfg(
   overrides: Partial<ClawdbotConfig> = {},
 ): ClawdbotConfig {
   const base: ClawdbotConfig = {
-    agent: {
-      model: "anthropic/claude-opus-4-5",
-      workspace: path.join(home, "clawd"),
+    agents: {
+      defaults: {
+        model: "anthropic/claude-opus-4-5",
+        workspace: path.join(home, "clawd"),
+      },
     },
     session: { store: storePath, mainKey: "main" },
   } as ClawdbotConfig;
@@ -123,6 +125,78 @@ describe("runCronIsolatedAgentTurn", () => {
 
       expect(res.status).toBe("ok");
       expect(res.summary).toBe("last");
+    });
+  });
+
+  it("uses model override when provided", async () => {
+    await withTempHome(async (home) => {
+      const storePath = await writeSessionStore(home);
+      const deps: CliDeps = {
+        sendMessageWhatsApp: vi.fn(),
+        sendMessageTelegram: vi.fn(),
+        sendMessageDiscord: vi.fn(),
+        sendMessageSignal: vi.fn(),
+        sendMessageIMessage: vi.fn(),
+      };
+      vi.mocked(runEmbeddedPiAgent).mockResolvedValue({
+        payloads: [{ text: "ok" }],
+        meta: {
+          durationMs: 5,
+          agentMeta: { sessionId: "s", provider: "p", model: "m" },
+        },
+      });
+
+      const res = await runCronIsolatedAgentTurn({
+        cfg: makeCfg(home, storePath),
+        deps,
+        job: makeJob({
+          kind: "agentTurn",
+          message: "do it",
+          model: "openai/gpt-4.1-mini",
+        }),
+        message: "do it",
+        sessionKey: "cron:job-1",
+        lane: "cron",
+      });
+
+      expect(res.status).toBe("ok");
+      const call = vi.mocked(runEmbeddedPiAgent).mock.calls[0]?.[0] as {
+        provider?: string;
+        model?: string;
+      };
+      expect(call?.provider).toBe("openai");
+      expect(call?.model).toBe("gpt-4.1-mini");
+    });
+  });
+
+  it("rejects invalid model override", async () => {
+    await withTempHome(async (home) => {
+      const storePath = await writeSessionStore(home);
+      const deps: CliDeps = {
+        sendMessageWhatsApp: vi.fn(),
+        sendMessageTelegram: vi.fn(),
+        sendMessageDiscord: vi.fn(),
+        sendMessageSignal: vi.fn(),
+        sendMessageIMessage: vi.fn(),
+      };
+      vi.mocked(runEmbeddedPiAgent).mockReset();
+
+      const res = await runCronIsolatedAgentTurn({
+        cfg: makeCfg(home, storePath),
+        deps,
+        job: makeJob({
+          kind: "agentTurn",
+          message: "do it",
+          model: "openai/",
+        }),
+        message: "do it",
+        sessionKey: "cron:job-1",
+        lane: "cron",
+      });
+
+      expect(res.status).toBe("error");
+      expect(res.error).toMatch("invalid model");
+      expect(vi.mocked(runEmbeddedPiAgent)).not.toHaveBeenCalled();
     });
   });
 
@@ -330,6 +404,96 @@ describe("runCronIsolatedAgentTurn", () => {
           process.env.TELEGRAM_BOT_TOKEN = prevTelegramToken;
         }
       }
+    });
+  });
+
+  it("delivers telegram topic targets with messageThreadId", async () => {
+    await withTempHome(async (home) => {
+      const storePath = await writeSessionStore(home);
+      const deps: CliDeps = {
+        sendMessageWhatsApp: vi.fn(),
+        sendMessageTelegram: vi.fn().mockResolvedValue({
+          messageId: "t1",
+          chatId: "-1001234567890",
+        }),
+        sendMessageDiscord: vi.fn(),
+        sendMessageSignal: vi.fn(),
+        sendMessageIMessage: vi.fn(),
+      };
+      vi.mocked(runEmbeddedPiAgent).mockResolvedValue({
+        payloads: [{ text: "hello from cron" }],
+        meta: {
+          durationMs: 5,
+          agentMeta: { sessionId: "s", provider: "p", model: "m" },
+        },
+      });
+
+      const res = await runCronIsolatedAgentTurn({
+        cfg: makeCfg(home, storePath),
+        deps,
+        job: makeJob({
+          kind: "agentTurn",
+          message: "do it",
+          deliver: true,
+          provider: "telegram",
+          to: "telegram:group:-1001234567890:topic:321",
+        }),
+        message: "do it",
+        sessionKey: "cron:job-1",
+        lane: "cron",
+      });
+
+      expect(res.status).toBe("ok");
+      expect(deps.sendMessageTelegram).toHaveBeenCalledWith(
+        "-1001234567890",
+        "hello from cron",
+        expect.objectContaining({ messageThreadId: 321 }),
+      );
+    });
+  });
+
+  it("delivers telegram shorthand topic suffixes with messageThreadId", async () => {
+    await withTempHome(async (home) => {
+      const storePath = await writeSessionStore(home);
+      const deps: CliDeps = {
+        sendMessageWhatsApp: vi.fn(),
+        sendMessageTelegram: vi.fn().mockResolvedValue({
+          messageId: "t1",
+          chatId: "-1001234567890",
+        }),
+        sendMessageDiscord: vi.fn(),
+        sendMessageSignal: vi.fn(),
+        sendMessageIMessage: vi.fn(),
+      };
+      vi.mocked(runEmbeddedPiAgent).mockResolvedValue({
+        payloads: [{ text: "hello from cron" }],
+        meta: {
+          durationMs: 5,
+          agentMeta: { sessionId: "s", provider: "p", model: "m" },
+        },
+      });
+
+      const res = await runCronIsolatedAgentTurn({
+        cfg: makeCfg(home, storePath),
+        deps,
+        job: makeJob({
+          kind: "agentTurn",
+          message: "do it",
+          deliver: true,
+          provider: "telegram",
+          to: "-1001234567890:321",
+        }),
+        message: "do it",
+        sessionKey: "cron:job-1",
+        lane: "cron",
+      });
+
+      expect(res.status).toBe("ok");
+      expect(deps.sendMessageTelegram).toHaveBeenCalledWith(
+        "-1001234567890",
+        "hello from cron",
+        expect.objectContaining({ messageThreadId: 321 }),
+      );
     });
   });
 
@@ -576,7 +740,13 @@ describe("runCronIsolatedAgentTurn", () => {
       });
 
       const cfg = makeCfg(home, storePath);
-      cfg.agent = { ...cfg.agent, heartbeat: { ackMaxChars: 0 } };
+      cfg.agents = {
+        ...cfg.agents,
+        defaults: {
+          ...cfg.agents?.defaults,
+          heartbeat: { ackMaxChars: 0 },
+        },
+      };
 
       const res = await runCronIsolatedAgentTurn({
         cfg,

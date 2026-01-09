@@ -17,7 +17,8 @@ Use these hubs to discover every page, including deep dives and reference docs t
 - [Dashboard (local Gateway)](http://127.0.0.1:18789/)
 - [FAQ](https://docs.clawd.bot/start/faq)
 - [Configuration](https://docs.clawd.bot/gateway/configuration)
-- [Clawd (personal assistant)](https://docs.clawd.bot/start/clawd)
+- [Configuration examples](https://docs.clawd.bot/gateway/configuration-examples)
+- [Clawdbot assistant (Clawd)](https://docs.clawd.bot/start/clawd)
 - [Showcase](https://docs.clawd.bot/start/showcase)
 - [Lore](https://docs.clawd.bot/start/lore)
 
@@ -53,6 +54,7 @@ Use these hubs to discover every page, including deep dives and reference docs t
 - [Groups](https://docs.clawd.bot/concepts/groups)
 - [Group messages](https://docs.clawd.bot/concepts/group-messages)
 - [Model failover](https://docs.clawd.bot/concepts/model-failover)
+- [OAuth](https://docs.clawd.bot/concepts/oauth)
 
 ## Providers + ingress
 
@@ -78,6 +80,7 @@ Use these hubs to discover every page, including deep dives and reference docs t
 - [Heartbeat](https://docs.clawd.bot/gateway/heartbeat)
 - [Doctor](https://docs.clawd.bot/gateway/doctor)
 - [Logging](https://docs.clawd.bot/gateway/logging)
+- [Sandboxing](https://docs.clawd.bot/gateway/sandboxing)
 - [Dashboard](https://docs.clawd.bot/web/dashboard)
 - [Control UI](https://docs.clawd.bot/web/control-ui)
 - [Remote access](https://docs.clawd.bot/gateway/remote)
@@ -97,7 +100,7 @@ Use these hubs to discover every page, including deep dives and reference docs t
 - [Models](https://docs.clawd.bot/concepts/models)
 - [Sub-agents](https://docs.clawd.bot/tools/subagents)
 - [Agent send CLI](https://docs.clawd.bot/tools/agent-send)
-- [Terminal UI](https://docs.clawd.bot/web/tui)
+- [Terminal UI](https://docs.clawd.bot/tui)
 - [Browser control](https://docs.clawd.bot/tools/browser)
 - [Browser (Linux troubleshooting)](https://docs.clawd.bot/tools/browser-linux-troubleshooting)
 - [Polls](https://docs.clawd.bot/automation/poll)
@@ -122,7 +125,7 @@ Use these hubs to discover every page, including deep dives and reference docs t
 - [Linux](https://docs.clawd.bot/platforms/linux)
 - [Web surfaces](https://docs.clawd.bot/web)
 
-## macOS companion app (internals)
+## macOS companion app (advanced)
 
 - [macOS dev setup](https://docs.clawd.bot/platforms/mac/dev-setup)
 - [macOS menu bar](https://docs.clawd.bot/platforms/mac/menu-bar)
@@ -141,7 +144,7 @@ Use these hubs to discover every page, including deep dives and reference docs t
 - [macOS bun gateway](https://docs.clawd.bot/platforms/mac/bun)
 - [macOS XPC](https://docs.clawd.bot/platforms/mac/xpc)
 - [macOS skills](https://docs.clawd.bot/platforms/mac/skills)
-- [macOS Peekaboo plan](https://docs.clawd.bot/platforms/mac/peekaboo)
+- [macOS Peekaboo](https://docs.clawd.bot/platforms/mac/peekaboo)
 
 ## Workspace + templates
 
@@ -157,13 +160,13 @@ Use these hubs to discover every page, including deep dives and reference docs t
 - [Templates: TOOLS](https://docs.clawd.bot/reference/templates/TOOLS)
 - [Templates: USER](https://docs.clawd.bot/reference/templates/USER)
 
-## Experiments + proposals
+## Experiments (exploratory)
 
 - [Onboarding config protocol](https://docs.clawd.bot/experiments/onboarding-config-protocol)
-- [Plan: cron hardening](https://docs.clawd.bot/experiments/plans/cron-add-hardening)
-- [Plan: group policy hardening](https://docs.clawd.bot/experiments/plans/group-policy-hardening)
+- [Cron hardening notes](https://docs.clawd.bot/experiments/plans/cron-add-hardening)
+- [Group policy hardening notes](https://docs.clawd.bot/experiments/plans/group-policy-hardening)
 - [Research: memory](https://docs.clawd.bot/experiments/research/memory)
-- [Proposal: model config](https://docs.clawd.bot/experiments/proposals/model-config)
+- [Model config exploration](https://docs.clawd.bot/experiments/proposals/model-config)
 
 ## Testing + release
 

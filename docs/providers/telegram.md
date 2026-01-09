@@ -5,7 +5,6 @@ read_when:
 ---
 # Telegram (Bot API)
 
-Updated: 2026-01-08
 
 Status: production-ready for bot DMs + groups via grammY. Long-polling by default; webhook optional.
 
@@ -15,8 +14,17 @@ Status: production-ready for bot DMs + groups via grammY. Long-polling by defaul
 - DMs share the agent's main session; groups stay isolated (`telegram:group:<chatId>`).
 
 ## Setup (fast path)
-1) Create a bot with @BotFather and copy the token.
-2) Configure the token (env or config). Example:
+### 1) Create a bot token (BotFather)
+1) Open Telegram and chat with **@BotFather**.
+2) Run `/newbot`, then follow the prompts (name + username ending in `bot`).
+3) Copy the token and store it safely.
+
+Optional BotFather settings:
+- `/setjoingroups` — allow/deny adding the bot to groups.
+- `/setprivacy` — control whether the bot sees all group messages.
+
+### 2) Configure the token (env or config)
+Example:
 
 ```json5
 {
@@ -33,13 +41,33 @@ Multi-account support: use `telegram.accounts` with per-account tokens and optio
 
 3) Start the gateway. Telegram starts when a `telegram` config section exists and a token is resolved.
 4) DM access defaults to pairing. Approve the code when the bot is first contacted.
-5) For groups: add the bot, disable privacy mode (or make it admin), then set `telegram.groups` to control mention gating + allowlists.
+5) For groups: add the bot, decide privacy/admin behavior (below), then set `telegram.groups` to control mention gating + allowlists.
+
+## Token + privacy + permissions (Telegram side)
+
+### Token creation (BotFather)
+- `/newbot` creates the bot and returns the token (keep it secret).
+- If a token leaks, revoke/regenerate it via @BotFather and update your config.
+
+### Group message visibility (Privacy Mode)
+Telegram bots default to **Privacy Mode**, which limits which group messages they receive.
+If your bot must see *all* group messages, you have two options:
+- Disable privacy mode with `/setprivacy` **or**
+- Add the bot as a group **admin** (admin bots receive all messages).
+
+**Note:** When you toggle privacy mode, Telegram requires removing + re‑adding the bot
+to each group for the change to take effect.
+
+### Group permissions (admin rights)
+Admin status is set inside the group (Telegram UI). Admin bots always receive all
+group messages, so use admin if you need full visibility.
 
 ## How it works (behavior)
 - Inbound messages are normalized into the shared provider envelope with reply context and media placeholders.
-- Group replies require a mention by default (native @mention or `routing.groupChat.mentionPatterns`).
+- Group replies require a mention by default (native @mention or `agents.list[].groupChat.mentionPatterns` / `messages.groupChat.mentionPatterns`).
+- Multi-agent override: set per-agent patterns on `agents.list[].groupChat.mentionPatterns`.
 - Replies always route back to the same Telegram chat.
-- Long-polling uses grammY runner with per-chat sequencing; overall concurrency is capped by `agent.maxConcurrent`.
+- Long-polling uses grammY runner with per-chat sequencing; overall concurrency is capped by `agents.defaults.maxConcurrent`.
 
 ## Formatting (Telegram HTML)
 - Outbound Telegram text uses `parse_mode: "HTML"` (Telegram’s supported tag subset).
@@ -53,7 +81,7 @@ Multi-account support: use `telegram.accounts` with per-account tokens and optio
 
 ## Group activation modes
 
-By default, the bot only responds to mentions in groups (`@botname` or patterns in `routing.groupChat.mentionPatterns`). To change this behavior:
+By default, the bot only responds to mentions in groups (`@botname` or patterns in `agents.list[].groupChat.mentionPatterns`). To change this behavior:
 
 ### Via config (recommended)
 
@@ -195,20 +223,22 @@ Outbound Telegram API calls retry on transient network/429 errors with exponenti
 
 ## Delivery targets (CLI/cron)
 - Use a chat id (`123456789`) or a username (`@name`) as the target.
-- Example: `clawdbot send --provider telegram --to 123456789 "hi"`.
+- Example: `clawdbot message send --provider telegram --to 123456789 --message "hi"`.
 
 ## Troubleshooting
 
-**Bot doesn't respond to non-mention messages in group:**
-- Check if group is in `telegram.groups` with `requireMention: false`
-- Or use `"*": { "requireMention": false }` to enable for all groups
-- Test with `/activation always` command (requires config change to persist)
+**Bot doesn’t respond to non-mention messages in a group:**
+- If you set `telegram.groups.*.requireMention=false`, Telegram’s Bot API **privacy mode** must be disabled.
+  - BotFather: `/setprivacy` → **Disable** (then remove + re-add the bot to the group)
+- `clawdbot providers status` shows a warning when config expects unmentioned group messages.
+- `clawdbot providers status --probe` can additionally check membership for explicit numeric group IDs (it can’t audit wildcard `"*"` rules).
+- Quick test: `/activation always` (session-only; use config for persistence)
 
 **Bot not seeing group messages at all:**
 - If `telegram.groups` is set, the group must be listed or use `"*"`
 - Check Privacy Settings in @BotFather → "Group Privacy" should be **OFF**
 - Verify bot is actually a member (not just an admin with no read access)
-- Check gateway logs: `journalctl --user -u clawdbot -f` (look for "skipping group message")
+- Check gateway logs: `clawdbot logs --follow` (look for "skipping group message")
 
 **Bot responds to mentions but not `/activation always`:**
 - The `/activation` command updates session state but doesn't persist to config
@@ -250,6 +280,7 @@ Provider options:
 - `telegram.actions.sendMessage`: gate Telegram tool message sends.
 
 Related global options:
-- `routing.groupChat.mentionPatterns` (mention gating patterns).
+- `agents.list[].groupChat.mentionPatterns` (mention gating patterns).
+- `messages.groupChat.mentionPatterns` (global fallback).
 - `commands.native`, `commands.text`, `commands.useAccessGroups` (command behavior).
 - `messages.responsePrefix`, `messages.ackReaction`, `messages.ackReactionScope`.

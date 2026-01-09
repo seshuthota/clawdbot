@@ -162,8 +162,11 @@ type MentionConfig = {
   allowFrom?: Array<string | number>;
 };
 
-function buildMentionConfig(cfg: ReturnType<typeof loadConfig>): MentionConfig {
-  const mentionRegexes = buildMentionRegexes(cfg);
+function buildMentionConfig(
+  cfg: ReturnType<typeof loadConfig>,
+  agentId?: string,
+): MentionConfig {
+  const mentionRegexes = buildMentionRegexes(cfg, agentId);
   return { mentionRegexes, allowFrom: cfg.whatsapp?.allowFrom };
 }
 
@@ -338,7 +341,7 @@ export async function runWebHeartbeatOnce(opts: {
 
     const replyResult = await replyResolver(
       {
-        Body: resolveHeartbeatPrompt(cfg.agent?.heartbeat?.prompt),
+        Body: resolveHeartbeatPrompt(cfg.agents?.defaults?.heartbeat?.prompt),
         From: to,
         To: to,
         MessageSid: sessionId ?? sessionSnapshot.entry?.sessionId,
@@ -374,7 +377,8 @@ export async function runWebHeartbeatOnce(opts: {
     );
     const ackMaxChars = Math.max(
       0,
-      cfg.agent?.heartbeat?.ackMaxChars ?? DEFAULT_HEARTBEAT_ACK_MAX_CHARS,
+      cfg.agents?.defaults?.heartbeat?.ackMaxChars ??
+        DEFAULT_HEARTBEAT_ACK_MAX_CHARS,
     );
     const stripped = stripHeartbeatToken(replyPayload.text, {
       mode: "heartbeat",
@@ -783,7 +787,7 @@ export async function monitorWebProvider(
       groups: account.groups,
     },
   } satisfies ReturnType<typeof loadConfig>;
-  const configuredMaxMb = cfg.agent?.mediaMaxMb;
+  const configuredMaxMb = cfg.agents?.defaults?.mediaMaxMb;
   const maxMediaBytes =
     typeof configuredMaxMb === "number" && configuredMaxMb > 0
       ? configuredMaxMb * 1024 * 1024
@@ -793,9 +797,11 @@ export async function monitorWebProvider(
     tuning.heartbeatSeconds,
   );
   const reconnectPolicy = resolveReconnectPolicy(cfg, tuning.reconnect);
-  const mentionConfig = buildMentionConfig(cfg);
+  const resolveMentionConfig = (agentId?: string) =>
+    buildMentionConfig(cfg, agentId);
+  const baseMentionConfig = resolveMentionConfig();
   const groupHistoryLimit =
-    cfg.routing?.groupChat?.historyLimit ?? DEFAULT_GROUP_HISTORY_LIMIT;
+    cfg.messages?.groupChat?.historyLimit ?? DEFAULT_GROUP_HISTORY_LIMIT;
   const groupHistories = new Map<
     string,
     Array<{ sender: string; body: string; timestamp?: number }>
@@ -913,7 +919,7 @@ export async function monitorWebProvider(
   };
 
   const resolveOwnerList = (selfE164?: string | null) => {
-    const allowFrom = mentionConfig.allowFrom;
+    const allowFrom = baseMentionConfig.allowFrom;
     const raw =
       Array.isArray(allowFrom) && allowFrom.length > 0
         ? allowFrom
@@ -943,9 +949,13 @@ export async function monitorWebProvider(
     );
   };
 
-  const stripMentionsForCommand = (text: string, selfE164?: string | null) => {
+  const stripMentionsForCommand = (
+    text: string,
+    mentionRegexes: RegExp[],
+    selfE164?: string | null,
+  ) => {
     let result = text;
-    for (const re of mentionConfig.mentionRegexes) {
+    for (const re of mentionRegexes) {
       result = result.replace(re, " ");
     }
     if (selfE164) {
@@ -1252,7 +1262,7 @@ export async function monitorWebProvider(
           Provider: "whatsapp",
           Surface: "whatsapp",
           OriginatingChannel: "whatsapp",
-          OriginatingTo: msg.to,
+          OriginatingTo: msg.from,
         },
         cfg,
         dispatcher,
@@ -1362,7 +1372,12 @@ export async function monitorWebProvider(
             });
           }
           noteGroupMember(groupHistoryKey, msg.senderE164, msg.senderName);
-          const commandBody = stripMentionsForCommand(msg.body, msg.selfE164);
+          const mentionConfig = resolveMentionConfig(route.agentId);
+          const commandBody = stripMentionsForCommand(
+            msg.body,
+            mentionConfig.mentionRegexes,
+            msg.selfE164,
+          );
           const activationCommand = parseActivationCommand(commandBody);
           const isOwner = isOwnerSender(msg);
           const statusCommand = isStatusCommand(commandBody);
@@ -1611,7 +1626,7 @@ export async function monitorWebProvider(
 
     if (loggedOut) {
       runtime.error(
-        "WhatsApp session logged out. Run `clawdbot login --provider web` to relink.",
+        "WhatsApp session logged out. Run `clawdbot providers login --provider web` to relink.",
       );
       await closeListener();
       break;

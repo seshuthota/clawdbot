@@ -20,11 +20,11 @@ read_when:
   <a href="https://github.com/clawdbot/clawdbot">GitHub</a> ·
   <a href="https://github.com/clawdbot/clawdbot/releases">Releases</a> ·
   <a href="https://docs.clawd.bot">Docs</a> ·
-  <a href="https://docs.clawd.bot/start/clawd">Clawd setup</a>
+  <a href="https://docs.clawd.bot/start/clawd">Clawdbot assistant setup</a>
 </p>
 
 CLAWDBOT bridges WhatsApp (via WhatsApp Web / Baileys), Telegram (Bot API / grammY), Discord (Bot API / discord.js), and iMessage (imsg CLI) to coding agents like [Pi](https://github.com/badlogic/pi-mono).
-It’s built for [Clawd](https://clawd.me), a space lobster who needed a TARDIS.
+Clawdbot also powers [Clawd](https://clawd.me), the space‑lobster assistant.
 
 ## Start here
 
@@ -98,16 +98,29 @@ Note: legacy Claude/Codex/Gemini/Opencode paths have been removed; Pi is the onl
 Runtime requirement: **Node ≥ 22**.
 
 ```bash
-# From source (recommended while the npm package is still settling)
-pnpm install
-pnpm build
-pnpm link --global
+# Recommended: global install (npm/pnpm)
+npm install -g clawdbot@latest
+# or: pnpm add -g clawdbot@latest
+
+# Onboard + install the daemon (launchd/systemd user service)
+clawdbot onboard --install-daemon
 
 # Pair WhatsApp Web (shows QR)
-clawdbot login
+clawdbot providers login
 
-# Run the Gateway (leave running)
+# Gateway runs via daemon after onboarding; manual run is still possible:
 clawdbot gateway --port 18789
+```
+
+From source (development):
+
+```bash
+git clone https://github.com/clawdbot/clawdbot.git
+cd clawdbot
+pnpm install
+pnpm ui:build # auto-installs UI deps on first run
+pnpm build
+pnpm clawdbot onboard --install-daemon
 ```
 
 Multi-instance quickstart (optional):
@@ -121,7 +134,7 @@ clawdbot gateway --port 19001
 Send a test message (requires a running Gateway):
 
 ```bash
-clawdbot send --to +15555550123 --message "Hello from CLAWDBOT"
+clawdbot message send --to +15555550123 --message "Hello from CLAWDBOT"
 ```
 
 ## Configuration (optional)
@@ -149,12 +162,13 @@ Example:
   - [Docs hubs (all pages linked)](https://docs.clawd.bot/start/hubs)
   - [FAQ](https://docs.clawd.bot/start/faq) ← *common questions answered*
   - [Configuration](https://docs.clawd.bot/gateway/configuration)
+  - [Configuration examples](https://docs.clawd.bot/gateway/configuration-examples)
   - [Slash commands](https://docs.clawd.bot/tools/slash-commands)
   - [Multi-agent routing](https://docs.clawd.bot/concepts/multi-agent)
   - [Updating / rollback](https://docs.clawd.bot/install/updating)
   - [Pairing (DM + nodes)](https://docs.clawd.bot/start/pairing)
   - [Nix mode](https://docs.clawd.bot/install/nix)
-  - [Clawd personal assistant setup](https://docs.clawd.bot/start/clawd)
+  - [Clawdbot assistant setup (Clawd)](https://docs.clawd.bot/start/clawd)
   - [Skills](https://docs.clawd.bot/tools/skills)
   - [Skills config](https://docs.clawd.bot/tools/skills-config)
   - [Workspace templates](https://docs.clawd.bot/reference/templates/AGENTS)

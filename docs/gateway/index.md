@@ -68,7 +68,7 @@ Defaults (can be overridden via env/flags/config):
 - `bridge.port=19002` (derived: `gateway.port+1`)
 - `browser.controlUrl=http://127.0.0.1:19003` (derived: `gateway.port+2`)
 - `canvasHost.port=19005` (derived: `gateway.port+4`)
-- `agent.workspace` default becomes `~/clawd-dev` when you run `setup`/`onboard` under `--dev`.
+- `agents.defaults.workspace` default becomes `~/clawd-dev` when you run `setup`/`onboard` under `--dev`.
 
 Derived ports (rules of thumb):
 - Base port = `gateway.port` (or `CLAWDBOT_GATEWAY_PORT` / `--port`)
@@ -81,7 +81,7 @@ Checklist per instance:
 - unique `gateway.port`
 - unique `CLAWDBOT_CONFIG_PATH`
 - unique `CLAWDBOT_STATE_DIR`
-- unique `agent.workspace`
+- unique `agents.defaults.workspace`
 - separate WhatsApp numbers (if using WA)
 
 Example:
@@ -127,7 +127,9 @@ See also: [`docs/presence.md`](/concepts/presence) for how presence is produced/
 ## Typing and validation
 - Server validates every inbound frame with AJV against JSON Schema emitted from the protocol definitions.
 - Clients (TS/Swift) consume generated types (TS directly; Swift via the repo’s generator).
-- Types live in [`src/gateway/protocol/*.ts`](https://github.com/clawdbot/clawdbot/blob/main/src/gateway/protocol/*.ts); regenerate schemas/models with `pnpm protocol:gen` (writes [`dist/protocol.schema.json`](https://github.com/clawdbot/clawdbot/blob/main/dist/protocol.schema.json)) and `pnpm protocol:gen:swift` (writes [`apps/macos/Sources/ClawdbotProtocol/GatewayModels.swift`](https://github.com/clawdbot/clawdbot/blob/main/apps/macos/Sources/ClawdbotProtocol/GatewayModels.swift)).
+- Protocol definitions are the source of truth; regenerate schema/models with:
+  - `pnpm protocol:gen`
+  - `pnpm protocol:gen:swift`
 
 ## Connection snapshot
 - `hello-ok` includes a `snapshot` with `presence`, `health`, `stateVersion`, and `uptimeMs` plus `policy {maxPayload,maxBufferedBytes,tickIntervalMs}` so clients can render immediately without extra requests.
@@ -156,6 +158,8 @@ See also: [`docs/presence.md`](/concepts/presence) for how presence is produced/
   - StandardOut/Err: file paths or `syslog`
 - On failure, launchd restarts; fatal misconfig should keep exiting so the operator notices.
 - LaunchAgents are per-user and require a logged-in session; for headless setups use a custom LaunchDaemon (not shipped).
+  - `clawdbot daemon install` writes `~/Library/LaunchAgents/com.clawdbot.gateway.plist`.
+  - `clawdbot doctor` audits the LaunchAgent config and can update it to current defaults.
 
 ## Daemon management (CLI)
 
@@ -166,23 +170,37 @@ clawdbot daemon status
 clawdbot daemon install
 clawdbot daemon stop
 clawdbot daemon restart
+clawdbot logs --follow
 ```
 
 Notes:
-- `daemon status` probes the Gateway RPC by default (same URL/token defaults as `gateway status`).
+- `daemon status` probes the Gateway RPC by default using the daemon’s resolved port/config (override with `--url`).
 - `daemon status --deep` adds system-level scans (LaunchDaemons/system units).
-- `daemon status` now reports runtime state (PID/exit status) and port collisions when the gateway isn’t reachable.
-- `gateway install|uninstall|start|stop|restart` remain supported as aliases; `daemon` is the dedicated manager.
-- `gateway daemon status` is an alias for `clawdbot daemon status`.
+- `daemon status --no-probe` skips the RPC probe (useful when networking is down).
+- `daemon status --json` is stable for scripts.
+- `daemon status` reports **supervisor runtime** (launchd/systemd running) separately from **RPC reachability** (WS connect + status RPC).
+- `daemon status` prints config path + probe target to avoid “localhost vs LAN bind” confusion and profile mismatches.
+- `daemon status` includes the last gateway error line when the service looks running but the port is closed.
+- `logs` tails the Gateway file log via RPC (no manual `tail`/`grep` needed).
 - If other gateway-like services are detected, the CLI warns. We recommend **one gateway per machine**; one gateway can host multiple agents.
   - Cleanup: `clawdbot daemon uninstall` (current service) and `clawdbot doctor` (legacy migrations).
+- `daemon install` is a no-op when already installed; use `clawdbot daemon install --force` to reinstall (profile/env/path changes).
 
 Bundled mac app:
 - Clawdbot.app can bundle a bun-compiled gateway binary and install a per-user LaunchAgent labeled `com.clawdbot.gateway`.
-- To stop it cleanly, use `clawdbot gateway stop` (or `launchctl bootout gui/$UID/com.clawdbot.gateway`).
-- To restart, use `clawdbot gateway restart` (or `launchctl kickstart -k gui/$UID/com.clawdbot.gateway`).
+- To stop it cleanly, use `clawdbot daemon stop` (or `launchctl bootout gui/$UID/com.clawdbot.gateway`).
+- To restart, use `clawdbot daemon restart` (or `launchctl kickstart -k gui/$UID/com.clawdbot.gateway`).
+  - `launchctl` only works if the LaunchAgent is installed; otherwise use `clawdbot daemon install` first.
 
 ## Supervision (systemd user unit)
+Clawdbot installs a **systemd user service** by default on Linux/WSL2. We
+recommend user services for single-user machines (simpler env, per-user config).
+Use a **system service** for multi-user or always-on servers (no lingering
+required, shared supervision).
+
+`clawdbot daemon install` writes the user unit. `clawdbot doctor` audits the
+unit and can update it to match the current recommended defaults.
+
 Create `~/.config/systemd/user/clawdbot-gateway.service`:
 ```
 [Unit]
@@ -236,10 +254,10 @@ Windows installs should use **WSL2** and follow the Linux systemd section above.
 
 ## CLI helpers
 - `clawdbot gateway health|status` — request health/status over the Gateway WS.
-- `clawdbot gateway send --to <num> --message "hi" [--media-url ...]` — send via Gateway (idempotent).
-- `clawdbot gateway agent --message "hi" [--to ...]` — run an agent turn (waits for final by default).
+- `clawdbot message send --to <num> --message "hi" [--media ...]` — send via Gateway (idempotent for WhatsApp).
+- `clawdbot agent --message "hi" --to <num>` — run an agent turn (waits for final by default).
 - `clawdbot gateway call <method> --params '{"k":"v"}'` — raw method invoker for debugging.
-- `clawdbot gateway stop|restart` — stop/restart the supervised gateway service (launchd/systemd).
+- `clawdbot daemon stop|restart` — stop/restart the supervised gateway service (launchd/systemd).
 - Gateway helper subcommands assume a running gateway on `--url`; they no longer auto-spawn one.
 
 ## Migration guidance

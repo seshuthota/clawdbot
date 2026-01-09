@@ -9,7 +9,7 @@ read_when:
 
 Clawdbot handles failures in two stages:
 1) **Auth profile rotation** within the current provider.
-2) **Model fallback** to the next model in `agent.model.fallbacks`.
+2) **Model fallback** to the next model in `agents.defaults.model.fallbacks`.
 
 This doc explains the runtime rules and the data that backs them.
 
@@ -20,6 +20,8 @@ Clawdbot uses **auth profiles** for both API keys and OAuth tokens.
 - Secrets live in `~/.clawdbot/agents/<agentId>/agent/auth-profiles.json` (legacy: `~/.clawdbot/agent/auth-profiles.json`).
 - Config `auth.profiles` / `auth.order` are **metadata + routing only** (no secrets).
 - Legacy import-only OAuth file: `~/.clawdbot/credentials/oauth.json` (imported into `auth-profiles.json` on first use).
+
+More detail: [/concepts/oauth](/concepts/oauth)
 
 Credential types:
 - `type: "api_key"` → `{ provider, key }`
@@ -80,14 +82,14 @@ State is stored in `auth-profiles.json` under `usageStats`:
 ## Model fallback
 
 If all profiles for a provider fail, Clawdbot moves to the next model in
-`agent.model.fallbacks`. This applies to auth failures, rate limits, and
+`agents.defaults.model.fallbacks`. This applies to auth failures, rate limits, and
 timeouts that exhausted profile rotation.
 
 ## Related config
 
 See [`docs/configuration.md`](/gateway/configuration) for:
 - `auth.profiles` / `auth.order`
-- `agent.model.primary` / `agent.model.fallbacks`
-- `agent.imageModel` routing
+- `agents.defaults.model.primary` / `agents.defaults.model.fallbacks`
+- `agents.defaults.imageModel` routing
 
 See [`docs/models.md`](/concepts/models) for the broader model selection and fallback overview.

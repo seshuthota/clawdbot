@@ -3,11 +3,15 @@ import type { Command } from "commander";
 import {
   providersAddCommand,
   providersListCommand,
+  providersLogsCommand,
   providersRemoveCommand,
   providersStatusCommand,
 } from "../commands/providers.js";
+import { danger } from "../globals.js";
+import { listChatProviders } from "../providers/registry.js";
 import { defaultRuntime } from "../runtime.js";
 import { hasExplicitOptions } from "./command-options.js";
+import { runProviderLogin, runProviderLogout } from "./provider-auth.js";
 
 const optionNamesAdd = [
   "provider",
@@ -30,6 +34,10 @@ const optionNamesAdd = [
 ] as const;
 
 const optionNamesRemove = ["provider", "account", "delete"] as const;
+
+const providerNames = listChatProviders()
+  .map((meta) => meta.id)
+  .join("|");
 
 export function registerProvidersCli(program: Command) {
   const providers = program
@@ -67,12 +75,24 @@ export function registerProvidersCli(program: Command) {
     });
 
   providers
+    .command("logs")
+    .description("Show recent provider logs from the gateway log file")
+    .option("--provider <name>", `Provider (${providerNames}|all)`, "all")
+    .option("--lines <n>", "Number of lines (default: 200)", "200")
+    .option("--json", "Output JSON", false)
+    .action(async (opts) => {
+      try {
+        await providersLogsCommand(opts, defaultRuntime);
+      } catch (err) {
+        defaultRuntime.error(String(err));
+        defaultRuntime.exit(1);
+      }
+    });
+
+  providers
     .command("add")
     .description("Add or update a provider account")
-    .option(
-      "--provider <name>",
-      "Provider (whatsapp|telegram|discord|slack|signal|imessage)",
-    )
+    .option("--provider <name>", `Provider (${providerNames})`)
     .option("--account <id>", "Account id (default when omitted)")
     .option("--name <name>", "Display name for this account")
     .option("--token <token>", "Bot token (Telegram/Discord)")
@@ -102,10 +122,7 @@ export function registerProvidersCli(program: Command) {
   providers
     .command("remove")
     .description("Disable or delete a provider account")
-    .option(
-      "--provider <name>",
-      "Provider (whatsapp|telegram|discord|slack|signal|imessage)",
-    )
+    .option("--provider <name>", `Provider (${providerNames})`)
     .option("--account <id>", "Account id (default when omitted)")
     .option("--delete", "Delete config entries (no prompt)", false)
     .action(async (opts, command) => {
@@ -114,6 +131,48 @@ export function registerProvidersCli(program: Command) {
         await providersRemoveCommand(opts, defaultRuntime, { hasFlags });
       } catch (err) {
         defaultRuntime.error(String(err));
+        defaultRuntime.exit(1);
+      }
+    });
+
+  providers
+    .command("login")
+    .description("Link a provider account (WhatsApp Web only)")
+    .option("--provider <provider>", "Provider alias (default: whatsapp)")
+    .option("--account <id>", "WhatsApp account id (accountId)")
+    .option("--verbose", "Verbose connection logs", false)
+    .action(async (opts) => {
+      try {
+        await runProviderLogin(
+          {
+            provider: opts.provider as string | undefined,
+            account: opts.account as string | undefined,
+            verbose: Boolean(opts.verbose),
+          },
+          defaultRuntime,
+        );
+      } catch (err) {
+        defaultRuntime.error(danger(`Provider login failed: ${String(err)}`));
+        defaultRuntime.exit(1);
+      }
+    });
+
+  providers
+    .command("logout")
+    .description("Log out of a provider session (WhatsApp Web only)")
+    .option("--provider <provider>", "Provider alias (default: whatsapp)")
+    .option("--account <id>", "WhatsApp account id (accountId)")
+    .action(async (opts) => {
+      try {
+        await runProviderLogout(
+          {
+            provider: opts.provider as string | undefined,
+            account: opts.account as string | undefined,
+          },
+          defaultRuntime,
+        );
+      } catch (err) {
+        defaultRuntime.error(danger(`Provider logout failed: ${String(err)}`));
         defaultRuntime.exit(1);
       }
     });

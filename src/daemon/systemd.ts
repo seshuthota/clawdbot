@@ -33,6 +33,12 @@ function resolveSystemdUnitPath(
   return resolveSystemdUnitPathForName(env, GATEWAY_SYSTEMD_SERVICE_NAME);
 }
 
+export function resolveSystemdUserUnitPath(
+  env: Record<string, string | undefined>,
+): string {
+  return resolveSystemdUnitPath(env);
+}
+
 function resolveLoginctlUser(
   env: Record<string, string | undefined>,
 ): string | null {
@@ -141,10 +147,17 @@ function buildSystemdUnit({
   return [
     "[Unit]",
     "Description=Clawdbot Gateway",
+    "After=network-online.target",
+    "Wants=network-online.target",
     "",
     "[Service]",
     `ExecStart=${execStart}`,
     "Restart=always",
+    "RestartSec=5",
+    // KillMode=process ensures systemd only waits for the main process to exit.
+    // Without this, podman's conmon (container monitor) processes block shutdown
+    // since they run as children of the gateway and stay in the same cgroup.
+    "KillMode=process",
     workingDirLine,
     ...envLines,
     "",
@@ -191,12 +204,18 @@ function parseSystemdExecStart(value: string): string[] {
 
 export async function readSystemdServiceExecStart(
   env: Record<string, string | undefined>,
-): Promise<{ programArguments: string[]; workingDirectory?: string } | null> {
+): Promise<{
+  programArguments: string[];
+  workingDirectory?: string;
+  environment?: Record<string, string>;
+  sourcePath?: string;
+} | null> {
   const unitPath = resolveSystemdUnitPath(env);
   try {
     const content = await fs.readFile(unitPath, "utf8");
     let execStart = "";
     let workingDirectory = "";
+    const environment: Record<string, string> = {};
     for (const rawLine of content.split("\n")) {
       const line = rawLine.trim();
       if (!line || line.startsWith("#")) continue;
@@ -204,6 +223,10 @@ export async function readSystemdServiceExecStart(
         execStart = line.slice("ExecStart=".length).trim();
       } else if (line.startsWith("WorkingDirectory=")) {
         workingDirectory = line.slice("WorkingDirectory=".length).trim();
+      } else if (line.startsWith("Environment=")) {
+        const raw = line.slice("Environment=".length).trim();
+        const parsed = parseSystemdEnvAssignment(raw);
+        if (parsed) environment[parsed.key] = parsed.value;
       }
     }
     if (!execStart) return null;
@@ -211,10 +234,45 @@ export async function readSystemdServiceExecStart(
     return {
       programArguments,
       ...(workingDirectory ? { workingDirectory } : {}),
+      ...(Object.keys(environment).length > 0 ? { environment } : {}),
+      sourcePath: unitPath,
     };
   } catch {
     return null;
   }
+}
+
+function parseSystemdEnvAssignment(
+  raw: string,
+): { key: string; value: string } | null {
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+
+  const unquoted = (() => {
+    if (!(trimmed.startsWith('"') && trimmed.endsWith('"'))) return trimmed;
+    let out = "";
+    let escapeNext = false;
+    for (const ch of trimmed.slice(1, -1)) {
+      if (escapeNext) {
+        out += ch;
+        escapeNext = false;
+        continue;
+      }
+      if (ch === "\\") {
+        escapeNext = true;
+        continue;
+      }
+      out += ch;
+    }
+    return out;
+  })();
+
+  const eq = unquoted.indexOf("=");
+  if (eq <= 0) return null;
+  const key = unquoted.slice(0, eq).trim();
+  if (!key) return null;
+  const value = unquoted.slice(eq + 1);
+  return { key, value };
 }
 
 export type SystemdServiceInfo = {

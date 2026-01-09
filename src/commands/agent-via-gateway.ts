@@ -1,4 +1,5 @@
 import type { CliDeps } from "../cli/deps.js";
+import { withProgress } from "../cli/progress.js";
 import { loadConfig } from "../config/config.js";
 import {
   loadSessionStore,
@@ -79,7 +80,7 @@ function parseTimeoutSeconds(opts: {
   const raw =
     opts.timeout !== undefined
       ? Number.parseInt(String(opts.timeout), 10)
-      : (opts.cfg.agent?.timeoutSeconds ?? 600);
+      : (opts.cfg.agents?.defaults?.timeoutSeconds ?? 600);
   if (Number.isNaN(raw) || raw <= 0) {
     throw new Error("--timeout must be a positive integer (seconds)");
   }
@@ -125,26 +126,34 @@ export async function agentViaGatewayCommand(
   const provider = normalizeMessageProvider(opts.provider) ?? "whatsapp";
   const idempotencyKey = opts.runId?.trim() || randomIdempotencyKey();
 
-  const response = await callGateway<GatewayAgentResponse>({
-    method: "agent",
-    params: {
-      message: body,
-      to: opts.to,
-      sessionId: opts.sessionId,
-      sessionKey,
-      thinking: opts.thinking,
-      deliver: Boolean(opts.deliver),
-      provider,
-      timeout: timeoutSeconds,
-      lane: opts.lane,
-      extraSystemPrompt: opts.extraSystemPrompt,
-      idempotencyKey,
+  const response = await withProgress(
+    {
+      label: "Waiting for agent reply…",
+      indeterminate: true,
+      enabled: opts.json !== true,
     },
-    expectFinal: true,
-    timeoutMs: gatewayTimeoutMs,
-    clientName: "cli",
-    mode: "cli",
-  });
+    async () =>
+      await callGateway<GatewayAgentResponse>({
+        method: "agent",
+        params: {
+          message: body,
+          to: opts.to,
+          sessionId: opts.sessionId,
+          sessionKey,
+          thinking: opts.thinking,
+          deliver: Boolean(opts.deliver),
+          provider,
+          timeout: timeoutSeconds,
+          lane: opts.lane,
+          extraSystemPrompt: opts.extraSystemPrompt,
+          idempotencyKey,
+        },
+        expectFinal: true,
+        timeoutMs: gatewayTimeoutMs,
+        clientName: "cli",
+        mode: "cli",
+      }),
+  );
 
   if (opts.json) {
     runtime.log(JSON.stringify(response, null, 2));

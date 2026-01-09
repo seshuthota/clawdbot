@@ -1,8 +1,12 @@
+import fs from "node:fs";
+import path from "node:path";
 import {
   resolveAgentDir,
   resolveAgentWorkspaceDir,
+  resolveDefaultAgentId,
 } from "../agents/agent-scope.js";
 import { ensureAuthProfileStore } from "../agents/auth-profiles.js";
+import { DEFAULT_IDENTITY_FILENAME } from "../agents/workspace.js";
 import type { ClawdbotConfig } from "../config/config.js";
 import {
   CONFIG_PATH_CLAWDBOT,
@@ -11,14 +15,49 @@ import {
 } from "../config/config.js";
 import { resolveSessionTranscriptsDirForAgent } from "../config/sessions.js";
 import {
+  listDiscordAccountIds,
+  resolveDefaultDiscordAccountId,
+  resolveDiscordAccount,
+} from "../discord/accounts.js";
+import {
+  listIMessageAccountIds,
+  resolveDefaultIMessageAccountId,
+  resolveIMessageAccount,
+} from "../imessage/accounts.js";
+import {
+  type ChatProviderId,
+  getChatProviderMeta,
+  normalizeChatProviderId,
+} from "../providers/registry.js";
+import {
   DEFAULT_ACCOUNT_ID,
   DEFAULT_AGENT_ID,
   normalizeAgentId,
 } from "../routing/session-key.js";
 import type { RuntimeEnv } from "../runtime.js";
 import { defaultRuntime } from "../runtime.js";
+import {
+  listSignalAccountIds,
+  resolveDefaultSignalAccountId,
+  resolveSignalAccount,
+} from "../signal/accounts.js";
+import {
+  listSlackAccountIds,
+  resolveDefaultSlackAccountId,
+  resolveSlackAccount,
+} from "../slack/accounts.js";
+import {
+  listTelegramAccountIds,
+  resolveDefaultTelegramAccountId,
+  resolveTelegramAccount,
+} from "../telegram/accounts.js";
 import { resolveUserPath } from "../utils.js";
-import { resolveDefaultWhatsAppAccountId } from "../web/accounts.js";
+import {
+  listWhatsAppAccountIds,
+  resolveDefaultWhatsAppAccountId,
+  resolveWhatsAppAuthDir,
+} from "../web/accounts.js";
+import { webAuthExists } from "../web/session.js";
 import { createClackPrompter } from "../wizard/clack-prompter.js";
 import { WizardCancelledError } from "../wizard/prompts.js";
 import { applyAuthChoice, warnIfModelConfigLooksOff } from "./auth-choice.js";
@@ -29,11 +68,16 @@ import type { AuthChoice, ProviderChoice } from "./onboard-types.js";
 
 type AgentsListOptions = {
   json?: boolean;
+  bindings?: boolean;
 };
 
 type AgentsAddOptions = {
   name?: string;
   workspace?: string;
+  model?: string;
+  agentDir?: string;
+  bind?: string[];
+  nonInteractive?: boolean;
   json?: boolean;
 };
 
@@ -46,10 +90,16 @@ type AgentsDeleteOptions = {
 export type AgentSummary = {
   id: string;
   name?: string;
+  identityName?: string;
+  identityEmoji?: string;
+  identitySource?: "identity" | "config";
   workspace: string;
   agentDir: string;
   model?: string;
   bindings: number;
+  bindingDetails?: string[];
+  routes?: string[];
+  providers?: string[];
   isDefault: boolean;
 };
 
@@ -64,51 +114,138 @@ type AgentBinding = {
   };
 };
 
+type AgentEntry = NonNullable<
+  NonNullable<ClawdbotConfig["agents"]>["list"]
+>[number];
+
+type AgentIdentity = {
+  name?: string;
+  emoji?: string;
+  creature?: string;
+  vibe?: string;
+};
+
+type ProviderAccountStatus = {
+  provider: ChatProviderId;
+  accountId: string;
+  name?: string;
+  state:
+    | "linked"
+    | "not linked"
+    | "configured"
+    | "not configured"
+    | "enabled"
+    | "disabled";
+  enabled?: boolean;
+  configured?: boolean;
+};
+
+function createQuietRuntime(runtime: RuntimeEnv): RuntimeEnv {
+  return { ...runtime, log: () => {} };
+}
+
+function listAgentEntries(cfg: ClawdbotConfig): AgentEntry[] {
+  const list = cfg.agents?.list;
+  if (!Array.isArray(list)) return [];
+  return list.filter((entry): entry is AgentEntry =>
+    Boolean(entry && typeof entry === "object"),
+  );
+}
+
+function findAgentEntryIndex(list: AgentEntry[], agentId: string): number {
+  const id = normalizeAgentId(agentId);
+  return list.findIndex((entry) => normalizeAgentId(entry.id) === id);
+}
+
 function resolveAgentName(cfg: ClawdbotConfig, agentId: string) {
-  return cfg.routing?.agents?.[agentId]?.name?.trim() || undefined;
+  const entry = listAgentEntries(cfg).find(
+    (agent) => normalizeAgentId(agent.id) === normalizeAgentId(agentId),
+  );
+  return entry?.name?.trim() || undefined;
 }
 
 function resolveAgentModel(cfg: ClawdbotConfig, agentId: string) {
-  if (agentId !== DEFAULT_AGENT_ID) {
-    return cfg.routing?.agents?.[agentId]?.model?.trim() || undefined;
-  }
-  const raw = cfg.agent?.model;
+  const entry = listAgentEntries(cfg).find(
+    (agent) => normalizeAgentId(agent.id) === normalizeAgentId(agentId),
+  );
+  if (entry?.model?.trim()) return entry.model.trim();
+  const raw = cfg.agents?.defaults?.model;
   if (typeof raw === "string") return raw;
   return raw?.primary?.trim() || undefined;
 }
 
-export function buildAgentSummaries(cfg: ClawdbotConfig): AgentSummary[] {
-  const defaultAgentId = normalizeAgentId(
-    cfg.routing?.defaultAgentId ?? DEFAULT_AGENT_ID,
-  );
-  const agentIds = new Set<string>([
-    DEFAULT_AGENT_ID,
-    defaultAgentId,
-    ...Object.keys(cfg.routing?.agents ?? {}),
-  ]);
+function parseIdentityMarkdown(content: string): AgentIdentity {
+  const identity: AgentIdentity = {};
+  const lines = content.split(/\r?\n/);
+  for (const line of lines) {
+    const match = line.match(/^\s*(?:-\s*)?([A-Za-z ]+):\s*(.+?)\s*$/);
+    if (!match) continue;
+    const label = match[1]?.trim().toLowerCase();
+    const value = match[2]?.trim();
+    if (!value) continue;
+    if (label === "name") identity.name = value;
+    if (label === "emoji") identity.emoji = value;
+    if (label === "creature") identity.creature = value;
+    if (label === "vibe") identity.vibe = value;
+  }
+  return identity;
+}
 
+function loadAgentIdentity(workspace: string): AgentIdentity | null {
+  const identityPath = path.join(workspace, DEFAULT_IDENTITY_FILENAME);
+  try {
+    const content = fs.readFileSync(identityPath, "utf-8");
+    const parsed = parseIdentityMarkdown(content);
+    if (!parsed.name && !parsed.emoji) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+export function buildAgentSummaries(cfg: ClawdbotConfig): AgentSummary[] {
+  const defaultAgentId = normalizeAgentId(resolveDefaultAgentId(cfg));
+  const configuredAgents = listAgentEntries(cfg);
+  const orderedIds =
+    configuredAgents.length > 0
+      ? configuredAgents.map((agent) => normalizeAgentId(agent.id))
+      : [defaultAgentId];
   const bindingCounts = new Map<string, number>();
-  for (const binding of cfg.routing?.bindings ?? []) {
+  for (const binding of cfg.bindings ?? []) {
     const agentId = normalizeAgentId(binding.agentId);
     bindingCounts.set(agentId, (bindingCounts.get(agentId) ?? 0) + 1);
   }
 
-  const ordered = [
-    DEFAULT_AGENT_ID,
-    ...[...agentIds]
-      .filter((id) => id !== DEFAULT_AGENT_ID)
-      .sort((a, b) => a.localeCompare(b)),
-  ];
+  const ordered = orderedIds.filter(
+    (id, index) => orderedIds.indexOf(id) === index,
+  );
 
-  return ordered.map((id) => ({
-    id,
-    name: resolveAgentName(cfg, id),
-    workspace: resolveAgentWorkspaceDir(cfg, id),
-    agentDir: resolveAgentDir(cfg, id),
-    model: resolveAgentModel(cfg, id),
-    bindings: bindingCounts.get(id) ?? 0,
-    isDefault: id === defaultAgentId,
-  }));
+  return ordered.map((id) => {
+    const workspace = resolveAgentWorkspaceDir(cfg, id);
+    const identity = loadAgentIdentity(workspace);
+    const configIdentity = configuredAgents.find(
+      (agent) => normalizeAgentId(agent.id) === id,
+    )?.identity;
+    const identityName = identity?.name ?? configIdentity?.name?.trim();
+    const identityEmoji = identity?.emoji ?? configIdentity?.emoji?.trim();
+    const identitySource = identity
+      ? "identity"
+      : configIdentity && (identityName || identityEmoji)
+        ? "config"
+        : undefined;
+    return {
+      id,
+      name: resolveAgentName(cfg, id),
+      identityName,
+      identityEmoji,
+      identitySource,
+      workspace,
+      agentDir: resolveAgentDir(cfg, id),
+      model: resolveAgentModel(cfg, id),
+      bindings: bindingCounts.get(id) ?? 0,
+      isDefault: id === defaultAgentId,
+    };
+  });
 }
 
 export function applyAgentConfig(
@@ -122,22 +259,34 @@ export function applyAgentConfig(
   },
 ): ClawdbotConfig {
   const agentId = normalizeAgentId(params.agentId);
-  const existing = cfg.routing?.agents?.[agentId] ?? {};
   const name = params.name?.trim();
+  const list = listAgentEntries(cfg);
+  const index = findAgentEntryIndex(list, agentId);
+  const base = index >= 0 ? list[index] : { id: agentId };
+  const nextEntry: AgentEntry = {
+    ...base,
+    ...(name ? { name } : {}),
+    ...(params.workspace ? { workspace: params.workspace } : {}),
+    ...(params.agentDir ? { agentDir: params.agentDir } : {}),
+    ...(params.model ? { model: params.model } : {}),
+  };
+  const nextList = [...list];
+  if (index >= 0) {
+    nextList[index] = nextEntry;
+  } else {
+    if (
+      nextList.length === 0 &&
+      agentId !== normalizeAgentId(resolveDefaultAgentId(cfg))
+    ) {
+      nextList.push({ id: resolveDefaultAgentId(cfg) });
+    }
+    nextList.push(nextEntry);
+  }
   return {
     ...cfg,
-    routing: {
-      ...cfg.routing,
-      agents: {
-        ...cfg.routing?.agents,
-        [agentId]: {
-          ...existing,
-          ...(name ? { name } : {}),
-          ...(params.workspace ? { workspace: params.workspace } : {}),
-          ...(params.agentDir ? { agentDir: params.agentDir } : {}),
-          ...(params.model ? { model: params.model } : {}),
-        },
-      },
+    agents: {
+      ...cfg.agents,
+      list: nextList,
     },
   };
 }
@@ -163,7 +312,7 @@ export function applyAgentBindings(
   skipped: AgentBinding[];
   conflicts: Array<{ binding: AgentBinding; existingAgentId: string }>;
 } {
-  const existing = cfg.routing?.bindings ?? [];
+  const existing = cfg.bindings ?? [];
   const existingMatchMap = new Map<string, string>();
   for (const binding of existing) {
     const key = bindingMatchKey(binding.match);
@@ -200,10 +349,7 @@ export function applyAgentBindings(
   return {
     config: {
       ...cfg,
-      routing: {
-        ...cfg.routing,
-        bindings: [...existing, ...added],
-      },
+      bindings: [...existing, ...added],
     },
     added,
     skipped,
@@ -220,39 +366,41 @@ export function pruneAgentConfig(
   removedAllow: number;
 } {
   const id = normalizeAgentId(agentId);
-  const agents = { ...cfg.routing?.agents };
-  delete agents[id];
-  const nextAgents = Object.keys(agents).length > 0 ? agents : undefined;
+  const agents = listAgentEntries(cfg);
+  const nextAgentsList = agents.filter(
+    (entry) => normalizeAgentId(entry.id) !== id,
+  );
+  const nextAgents = nextAgentsList.length > 0 ? nextAgentsList : undefined;
 
-  const bindings = cfg.routing?.bindings ?? [];
+  const bindings = cfg.bindings ?? [];
   const filteredBindings = bindings.filter(
     (binding) => normalizeAgentId(binding.agentId) !== id,
   );
 
-  const allow = cfg.routing?.agentToAgent?.allow ?? [];
+  const allow = cfg.tools?.agentToAgent?.allow ?? [];
   const filteredAllow = allow.filter((entry) => entry !== id);
 
-  const nextRouting = {
-    ...cfg.routing,
-    ...(nextAgents ? { agents: nextAgents } : {}),
-    ...(nextAgents ? {} : { agents: undefined }),
-    bindings: filteredBindings.length > 0 ? filteredBindings : undefined,
-    agentToAgent: cfg.routing?.agentToAgent
-      ? {
-          ...cfg.routing.agentToAgent,
+  const nextAgentsConfig = cfg.agents
+    ? { ...cfg.agents, list: nextAgents }
+    : nextAgents
+      ? { list: nextAgents }
+      : undefined;
+  const nextTools = cfg.tools?.agentToAgent
+    ? {
+        ...cfg.tools,
+        agentToAgent: {
+          ...cfg.tools.agentToAgent,
           allow: filteredAllow.length > 0 ? filteredAllow : undefined,
-        }
-      : undefined,
-    defaultAgentId:
-      normalizeAgentId(cfg.routing?.defaultAgentId ?? DEFAULT_AGENT_ID) === id
-        ? DEFAULT_AGENT_ID
-        : cfg.routing?.defaultAgentId,
-  };
+        },
+      }
+    : cfg.tools;
 
   return {
     config: {
       ...cfg,
-      routing: nextRouting,
+      agents: nextAgentsConfig,
+      bindings: filteredBindings.length > 0 ? filteredBindings : undefined,
+      tools: nextTools,
     },
     removedBindings: bindings.length - filteredBindings.length,
     removedAllow: allow.length - filteredAllow.length,
@@ -260,17 +408,228 @@ export function pruneAgentConfig(
 }
 
 function formatSummary(summary: AgentSummary) {
-  const name =
-    summary.name && summary.name !== summary.id ? ` "${summary.name}"` : "";
   const defaultTag = summary.isDefault ? " (default)" : "";
-  const parts = [
-    `${summary.id}${name}${defaultTag}`,
-    `workspace: ${summary.workspace}`,
-    `agentDir: ${summary.agentDir}`,
-    summary.model ? `model: ${summary.model}` : null,
-    `bindings: ${summary.bindings}`,
-  ].filter(Boolean);
-  return `- ${parts.join(" | ")}`;
+  const header =
+    summary.name && summary.name !== summary.id
+      ? `${summary.id}${defaultTag} (${summary.name})`
+      : `${summary.id}${defaultTag}`;
+
+  const identityParts = [];
+  if (summary.identityEmoji) identityParts.push(summary.identityEmoji);
+  if (summary.identityName) identityParts.push(summary.identityName);
+  const identityLine =
+    identityParts.length > 0 ? identityParts.join(" ") : null;
+  const identitySource =
+    summary.identitySource === "identity"
+      ? "IDENTITY.md"
+      : summary.identitySource === "config"
+        ? "config"
+        : null;
+
+  const lines = [`- ${header}`];
+  if (identityLine) {
+    lines.push(
+      `  Identity: ${identityLine}${identitySource ? ` (${identitySource})` : ""}`,
+    );
+  }
+  lines.push(`  Workspace: ${summary.workspace}`);
+  lines.push(`  Agent dir: ${summary.agentDir}`);
+  if (summary.model) lines.push(`  Model: ${summary.model}`);
+  lines.push(`  Routing rules: ${summary.bindings}`);
+
+  if (summary.routes?.length) {
+    lines.push(`  Routing: ${summary.routes.join(", ")}`);
+  }
+  if (summary.providers?.length) {
+    lines.push("  Providers:");
+    for (const provider of summary.providers) {
+      lines.push(`    - ${provider}`);
+    }
+  }
+
+  if (summary.bindingDetails?.length) {
+    lines.push("  Routing rules:");
+    for (const binding of summary.bindingDetails) {
+      lines.push(`    - ${binding}`);
+    }
+  }
+  return lines.join("\n");
+}
+
+function providerAccountKey(provider: ChatProviderId, accountId?: string) {
+  return `${provider}:${accountId ?? DEFAULT_ACCOUNT_ID}`;
+}
+
+function formatProviderAccountLabel(params: {
+  provider: ChatProviderId;
+  accountId: string;
+  name?: string;
+}): string {
+  const label = getChatProviderMeta(params.provider).label;
+  const account = params.name?.trim()
+    ? `${params.accountId} (${params.name.trim()})`
+    : params.accountId;
+  return `${label} ${account}`;
+}
+
+function formatProviderState(entry: ProviderAccountStatus): string {
+  const parts = [entry.state];
+  if (entry.enabled === false && entry.state !== "disabled") {
+    parts.push("disabled");
+  }
+  return parts.join(", ");
+}
+
+async function buildProviderStatusIndex(
+  cfg: ClawdbotConfig,
+): Promise<Map<string, ProviderAccountStatus>> {
+  const map = new Map<string, ProviderAccountStatus>();
+
+  for (const accountId of listWhatsAppAccountIds(cfg)) {
+    const { authDir } = resolveWhatsAppAuthDir({ cfg, accountId });
+    const linked = await webAuthExists(authDir);
+    const enabled =
+      cfg.whatsapp?.accounts?.[accountId]?.enabled ?? cfg.web?.enabled ?? true;
+    const hasConfig = Boolean(cfg.whatsapp);
+    map.set(providerAccountKey("whatsapp", accountId), {
+      provider: "whatsapp",
+      accountId,
+      name: cfg.whatsapp?.accounts?.[accountId]?.name,
+      state: linked ? "linked" : "not linked",
+      enabled,
+      configured: linked || hasConfig,
+    });
+  }
+
+  for (const accountId of listTelegramAccountIds(cfg)) {
+    const account = resolveTelegramAccount({ cfg, accountId });
+    const configured = Boolean(account.token);
+    map.set(providerAccountKey("telegram", accountId), {
+      provider: "telegram",
+      accountId,
+      name: account.name,
+      state: configured ? "configured" : "not configured",
+      enabled: account.enabled,
+      configured,
+    });
+  }
+
+  for (const accountId of listDiscordAccountIds(cfg)) {
+    const account = resolveDiscordAccount({ cfg, accountId });
+    const configured = Boolean(account.token);
+    map.set(providerAccountKey("discord", accountId), {
+      provider: "discord",
+      accountId,
+      name: account.name,
+      state: configured ? "configured" : "not configured",
+      enabled: account.enabled,
+      configured,
+    });
+  }
+
+  for (const accountId of listSlackAccountIds(cfg)) {
+    const account = resolveSlackAccount({ cfg, accountId });
+    const configured = Boolean(account.botToken && account.appToken);
+    map.set(providerAccountKey("slack", accountId), {
+      provider: "slack",
+      accountId,
+      name: account.name,
+      state: configured ? "configured" : "not configured",
+      enabled: account.enabled,
+      configured,
+    });
+  }
+
+  for (const accountId of listSignalAccountIds(cfg)) {
+    const account = resolveSignalAccount({ cfg, accountId });
+    map.set(providerAccountKey("signal", accountId), {
+      provider: "signal",
+      accountId,
+      name: account.name,
+      state: account.configured ? "configured" : "not configured",
+      enabled: account.enabled,
+      configured: account.configured,
+    });
+  }
+
+  for (const accountId of listIMessageAccountIds(cfg)) {
+    const account = resolveIMessageAccount({ cfg, accountId });
+    map.set(providerAccountKey("imessage", accountId), {
+      provider: "imessage",
+      accountId,
+      name: account.name,
+      state: account.enabled ? "enabled" : "disabled",
+      enabled: account.enabled,
+      configured: Boolean(cfg.imessage),
+    });
+  }
+
+  return map;
+}
+
+function resolveDefaultAccountId(
+  cfg: ClawdbotConfig,
+  provider: ChatProviderId,
+): string {
+  switch (provider) {
+    case "whatsapp":
+      return resolveDefaultWhatsAppAccountId(cfg) || DEFAULT_ACCOUNT_ID;
+    case "telegram":
+      return resolveDefaultTelegramAccountId(cfg) || DEFAULT_ACCOUNT_ID;
+    case "discord":
+      return resolveDefaultDiscordAccountId(cfg) || DEFAULT_ACCOUNT_ID;
+    case "slack":
+      return resolveDefaultSlackAccountId(cfg) || DEFAULT_ACCOUNT_ID;
+    case "signal":
+      return resolveDefaultSignalAccountId(cfg) || DEFAULT_ACCOUNT_ID;
+    case "imessage":
+      return resolveDefaultIMessageAccountId(cfg) || DEFAULT_ACCOUNT_ID;
+  }
+}
+
+function shouldShowProviderEntry(
+  entry: ProviderAccountStatus,
+  cfg: ClawdbotConfig,
+): boolean {
+  if (entry.provider === "whatsapp") {
+    return entry.state === "linked" || Boolean(cfg.whatsapp);
+  }
+  if (entry.provider === "imessage") {
+    return Boolean(cfg.imessage);
+  }
+  return Boolean(entry.configured);
+}
+
+function formatProviderEntry(entry: ProviderAccountStatus): string {
+  const label = formatProviderAccountLabel({
+    provider: entry.provider,
+    accountId: entry.accountId,
+    name: entry.name,
+  });
+  return `${label}: ${formatProviderState(entry)}`;
+}
+
+function summarizeBindings(
+  cfg: ClawdbotConfig,
+  bindings: AgentBinding[],
+): string[] {
+  if (bindings.length === 0) return [];
+  const seen = new Map<string, string>();
+  for (const binding of bindings) {
+    const provider = normalizeChatProviderId(binding.match.provider);
+    if (!provider) continue;
+    const accountId =
+      binding.match.accountId ?? resolveDefaultAccountId(cfg, provider);
+    const key = providerAccountKey(provider, accountId);
+    if (!seen.has(key)) {
+      const label = formatProviderAccountLabel({
+        provider,
+        accountId,
+      });
+      seen.set(key, label);
+    }
+  }
+  return [...seen.values()];
 }
 
 async function requireValidConfig(
@@ -300,12 +659,82 @@ export async function agentsListCommand(
   if (!cfg) return;
 
   const summaries = buildAgentSummaries(cfg);
+  const bindingMap = new Map<string, AgentBinding[]>();
+  for (const binding of cfg.bindings ?? []) {
+    const agentId = normalizeAgentId(binding.agentId);
+    const list = bindingMap.get(agentId) ?? [];
+    list.push(binding as AgentBinding);
+    bindingMap.set(agentId, list);
+  }
+
+  if (opts.bindings) {
+    for (const summary of summaries) {
+      const bindings = bindingMap.get(summary.id) ?? [];
+      if (bindings.length > 0) {
+        summary.bindingDetails = bindings.map((binding) =>
+          describeBinding(binding as AgentBinding),
+        );
+      }
+    }
+  }
+
+  const providerStatus = await buildProviderStatusIndex(cfg);
+  const allProviderEntries = [...providerStatus.values()];
+
+  for (const summary of summaries) {
+    const bindings = bindingMap.get(summary.id) ?? [];
+    const routes = summarizeBindings(cfg, bindings);
+    if (routes.length > 0) {
+      summary.routes = routes;
+    } else if (summary.isDefault) {
+      summary.routes = ["default (no explicit rules)"];
+    }
+
+    const providerLines: string[] = [];
+    if (bindings.length > 0) {
+      const seen = new Set<string>();
+      for (const binding of bindings) {
+        const provider = normalizeChatProviderId(binding.match.provider);
+        if (!provider) continue;
+        const accountId =
+          binding.match.accountId ?? resolveDefaultAccountId(cfg, provider);
+        const key = providerAccountKey(provider, accountId);
+        if (seen.has(key)) continue;
+        seen.add(key);
+        const status = providerStatus.get(key);
+        if (status) {
+          providerLines.push(formatProviderEntry(status));
+        } else {
+          providerLines.push(
+            `${formatProviderAccountLabel({ provider, accountId })}: unknown`,
+          );
+        }
+      }
+    } else if (summary.isDefault) {
+      for (const entry of allProviderEntries) {
+        if (shouldShowProviderEntry(entry, cfg)) {
+          providerLines.push(formatProviderEntry(entry));
+        }
+      }
+    }
+    if (providerLines.length > 0) {
+      summary.providers = providerLines;
+    }
+  }
+
   if (opts.json) {
     runtime.log(JSON.stringify(summaries, null, 2));
     return;
   }
 
-  runtime.log(["Agents:", ...summaries.map(formatSummary)].join("\n"));
+  const lines = ["Agents:", ...summaries.map(formatSummary)];
+  lines.push(
+    "Routing rules map provider/account/peer to an agent. Use --bindings for full rules.",
+  );
+  lines.push(
+    "Provider status reflects local config/creds. For live health: clawdbot providers status --probe.",
+  );
+  runtime.log(lines.join("\n"));
 }
 
 function describeBinding(binding: AgentBinding) {
@@ -340,19 +769,71 @@ function buildProviderBindings(params: {
   return bindings;
 }
 
+function parseBindingSpecs(params: {
+  agentId: string;
+  specs?: string[];
+  config: ClawdbotConfig;
+}): { bindings: AgentBinding[]; errors: string[] } {
+  const bindings: AgentBinding[] = [];
+  const errors: string[] = [];
+  const specs = params.specs ?? [];
+  const agentId = normalizeAgentId(params.agentId);
+  for (const raw of specs) {
+    const trimmed = raw?.trim();
+    if (!trimmed) continue;
+    const [providerRaw, accountRaw] = trimmed.split(":", 2);
+    const provider = normalizeChatProviderId(providerRaw);
+    if (!provider) {
+      errors.push(`Unknown provider "${providerRaw}".`);
+      continue;
+    }
+    let accountId = accountRaw?.trim();
+    if (accountRaw !== undefined && !accountId) {
+      errors.push(`Invalid binding "${trimmed}" (empty account id).`);
+      continue;
+    }
+    if (!accountId && provider === "whatsapp") {
+      accountId = resolveDefaultWhatsAppAccountId(params.config);
+      if (!accountId) accountId = DEFAULT_ACCOUNT_ID;
+    }
+    const match: AgentBinding["match"] = { provider };
+    if (accountId) match.accountId = accountId;
+    bindings.push({ agentId, match });
+  }
+  return { bindings, errors };
+}
+
 export async function agentsAddCommand(
   opts: AgentsAddOptions,
   runtime: RuntimeEnv = defaultRuntime,
+  params?: { hasFlags?: boolean },
 ) {
   const cfg = await requireValidConfig(runtime);
   if (!cfg) return;
 
   const workspaceFlag = opts.workspace?.trim();
   const nameInput = opts.name?.trim();
+  const hasFlags = params?.hasFlags === true;
+  const nonInteractive = Boolean(opts.nonInteractive || hasFlags);
 
-  if (workspaceFlag) {
+  if (nonInteractive && !workspaceFlag) {
+    runtime.error(
+      "Non-interactive mode requires --workspace. Re-run without flags to use the wizard.",
+    );
+    runtime.exit(1);
+    return;
+  }
+
+  if (nonInteractive) {
     if (!nameInput) {
-      runtime.error("Agent name is required when --workspace is provided.");
+      runtime.error("Agent name is required in non-interactive mode.");
+      runtime.exit(1);
+      return;
+    }
+    if (!workspaceFlag) {
+      runtime.error(
+        "Non-interactive mode requires --workspace. Re-run without flags to use the wizard.",
+      );
       runtime.exit(1);
       return;
     }
@@ -365,25 +846,47 @@ export async function agentsAddCommand(
     if (agentId !== nameInput) {
       runtime.log(`Normalized agent id to "${agentId}".`);
     }
-    if (cfg.routing?.agents?.[agentId]) {
+    if (findAgentEntryIndex(listAgentEntries(cfg), agentId) >= 0) {
       runtime.error(`Agent "${agentId}" already exists.`);
       runtime.exit(1);
       return;
     }
 
     const workspaceDir = resolveUserPath(workspaceFlag);
-    const agentDir = resolveAgentDir(cfg, agentId);
+    const agentDir = opts.agentDir?.trim()
+      ? resolveUserPath(opts.agentDir.trim())
+      : resolveAgentDir(cfg, agentId);
+    const model = opts.model?.trim();
     const nextConfig = applyAgentConfig(cfg, {
       agentId,
       name: nameInput,
       workspace: workspaceDir,
       agentDir,
+      ...(model ? { model } : {}),
     });
 
-    await writeConfigFile(nextConfig);
-    runtime.log(`Updated ${CONFIG_PATH_CLAWDBOT}`);
-    await ensureWorkspaceAndSessions(workspaceDir, runtime, {
-      skipBootstrap: Boolean(nextConfig.agent?.skipBootstrap),
+    const bindingParse = parseBindingSpecs({
+      agentId,
+      specs: opts.bind,
+      config: nextConfig,
+    });
+    if (bindingParse.errors.length > 0) {
+      runtime.error(bindingParse.errors.join("\n"));
+      runtime.exit(1);
+      return;
+    }
+    const bindingResult =
+      bindingParse.bindings.length > 0
+        ? applyAgentBindings(nextConfig, bindingParse.bindings)
+        : { config: nextConfig, added: [], skipped: [], conflicts: [] };
+
+    await writeConfigFile(bindingResult.config);
+    if (!opts.json) runtime.log(`Updated ${CONFIG_PATH_CLAWDBOT}`);
+    const quietRuntime = opts.json ? createQuietRuntime(runtime) : runtime;
+    await ensureWorkspaceAndSessions(workspaceDir, quietRuntime, {
+      skipBootstrap: Boolean(
+        bindingResult.config.agents?.defaults?.skipBootstrap,
+      ),
       agentId,
     });
 
@@ -392,6 +895,15 @@ export async function agentsAddCommand(
       name: nameInput,
       workspace: workspaceDir,
       agentDir,
+      model,
+      bindings: {
+        added: bindingResult.added.map(describeBinding),
+        skipped: bindingResult.skipped.map(describeBinding),
+        conflicts: bindingResult.conflicts.map(
+          (conflict) =>
+            `${describeBinding(conflict.binding)} (agent=${conflict.existingAgentId})`,
+        ),
+      },
     };
     if (opts.json) {
       runtime.log(JSON.stringify(payload, null, 2));
@@ -399,6 +911,18 @@ export async function agentsAddCommand(
       runtime.log(`Agent: ${agentId}`);
       runtime.log(`Workspace: ${workspaceDir}`);
       runtime.log(`Agent dir: ${agentDir}`);
+      if (model) runtime.log(`Model: ${model}`);
+      if (bindingResult.conflicts.length > 0) {
+        runtime.error(
+          [
+            "Skipped bindings already claimed by another agent:",
+            ...bindingResult.conflicts.map(
+              (conflict) =>
+                `- ${describeBinding(conflict.binding)} (agent=${conflict.existingAgentId})`,
+            ),
+          ].join("\n"),
+        );
+      }
     }
     return;
   }
@@ -426,7 +950,9 @@ export async function agentsAddCommand(
       await prompter.note(`Normalized id to "${agentId}".`, "Agent id");
     }
 
-    const existingAgent = cfg.routing?.agents?.[agentId];
+    const existingAgent = listAgentEntries(cfg).find(
+      (agent) => normalizeAgentId(agent.id) === agentId,
+    );
     if (existingAgent) {
       const shouldUpdate = await prompter.confirm({
         message: `Agent "${agentId}" already exists. Update it?`,
@@ -461,12 +987,15 @@ export async function agentsAddCommand(
       initialValue: false,
     });
     if (wantsAuth) {
-      const authStore = ensureAuthProfileStore(agentDir);
+      const authStore = ensureAuthProfileStore(agentDir, {
+        allowKeychainPrompt: false,
+      });
       const authChoice = (await prompter.select({
         message: "Model/auth choice",
         options: buildAuthChoiceOptions({
           store: authStore,
           includeSkip: true,
+          includeClaudeCliIfMissing: true,
         }),
       })) as AuthChoice;
 
@@ -508,8 +1037,7 @@ export async function agentsAddCommand(
 
     if (selection.length > 0) {
       const wantsBindings = await prompter.confirm({
-        message:
-          "Route selected providers to this agent now? (routing.bindings)",
+        message: "Route selected providers to this agent now? (bindings)",
         initialValue: false,
       });
       if (wantsBindings) {
@@ -536,7 +1064,7 @@ export async function agentsAddCommand(
       } else {
         await prompter.note(
           [
-            "Routing unchanged. Add routing.bindings when you're ready.",
+            "Routing unchanged. Add bindings when you're ready.",
             "Docs: https://docs.clawd.bot/concepts/multi-agent",
           ].join("\n"),
           "Routing",
@@ -547,7 +1075,7 @@ export async function agentsAddCommand(
     await writeConfigFile(nextConfig);
     runtime.log(`Updated ${CONFIG_PATH_CLAWDBOT}`);
     await ensureWorkspaceAndSessions(workspaceDir, runtime, {
-      skipBootstrap: Boolean(nextConfig.agent?.skipBootstrap),
+      skipBootstrap: Boolean(nextConfig.agents?.defaults?.skipBootstrap),
       agentId,
     });
 
@@ -594,7 +1122,7 @@ export async function agentsDeleteCommand(
     return;
   }
 
-  if (!cfg.routing?.agents?.[agentId]) {
+  if (findAgentEntryIndex(listAgentEntries(cfg), agentId) < 0) {
     runtime.error(`Agent "${agentId}" not found.`);
     runtime.exit(1);
     return;
@@ -623,11 +1151,12 @@ export async function agentsDeleteCommand(
 
   const result = pruneAgentConfig(cfg, agentId);
   await writeConfigFile(result.config);
-  runtime.log(`Updated ${CONFIG_PATH_CLAWDBOT}`);
+  if (!opts.json) runtime.log(`Updated ${CONFIG_PATH_CLAWDBOT}`);
 
-  await moveToTrash(workspaceDir, runtime);
-  await moveToTrash(agentDir, runtime);
-  await moveToTrash(sessionsDir, runtime);
+  const quietRuntime = opts.json ? createQuietRuntime(runtime) : runtime;
+  await moveToTrash(workspaceDir, quietRuntime);
+  await moveToTrash(agentDir, quietRuntime);
+  await moveToTrash(sessionsDir, quietRuntime);
 
   if (opts.json) {
     runtime.log(

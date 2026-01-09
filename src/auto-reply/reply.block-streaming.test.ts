@@ -85,9 +85,11 @@ describe("block streaming", () => {
           onBlockReply,
         },
         {
-          agent: {
-            model: "anthropic/claude-opus-4-5",
-            workspace: path.join(home, "clawd"),
+          agents: {
+            defaults: {
+              model: "anthropic/claude-opus-4-5",
+              workspace: path.join(home, "clawd"),
+            },
           },
           whatsapp: { allowFrom: ["*"] },
           session: { store: path.join(home, "sessions.json") },
@@ -100,6 +102,63 @@ describe("block streaming", () => {
       const res = await replyPromise;
       expect(res).toBeUndefined();
       expect(onBlockReply).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it("preserves block reply ordering when typing start is slow", async () => {
+    await withTempHome(async (home) => {
+      let releaseTyping: (() => void) | undefined;
+      const typingGate = new Promise<void>((resolve) => {
+        releaseTyping = resolve;
+      });
+      const onReplyStart = vi.fn(() => typingGate);
+      const seen: string[] = [];
+      const onBlockReply = vi.fn(async (payload) => {
+        seen.push(payload.text ?? "");
+      });
+
+      vi.mocked(runEmbeddedPiAgent).mockImplementation(async (params) => {
+        void params.onBlockReply?.({ text: "first" });
+        void params.onBlockReply?.({ text: "second" });
+        return {
+          payloads: [{ text: "first" }, { text: "second" }],
+          meta: {
+            durationMs: 5,
+            agentMeta: { sessionId: "s", provider: "p", model: "m" },
+          },
+        };
+      });
+
+      const replyPromise = getReplyFromConfig(
+        {
+          Body: "ping",
+          From: "+1004",
+          To: "+2000",
+          MessageSid: "msg-125",
+          Provider: "telegram",
+        },
+        {
+          onReplyStart,
+          onBlockReply,
+        },
+        {
+          agents: {
+            defaults: {
+              model: "anthropic/claude-opus-4-5",
+              workspace: path.join(home, "clawd"),
+            },
+          },
+          telegram: { allowFrom: ["*"] },
+          session: { store: path.join(home, "sessions.json") },
+        },
+      );
+
+      await waitForCalls(() => onReplyStart.mock.calls.length, 1);
+      releaseTyping?.();
+
+      const res = await replyPromise;
+      expect(res).toBeUndefined();
+      expect(seen).toEqual(["first", "second"]);
     });
   });
 
@@ -130,9 +189,11 @@ describe("block streaming", () => {
           onBlockReply,
         },
         {
-          agent: {
-            model: "anthropic/claude-opus-4-5",
-            workspace: path.join(home, "clawd"),
+          agents: {
+            defaults: {
+              model: "anthropic/claude-opus-4-5",
+              workspace: path.join(home, "clawd"),
+            },
           },
           whatsapp: { allowFrom: ["*"] },
           session: { store: path.join(home, "sessions.json") },
@@ -141,6 +202,63 @@ describe("block streaming", () => {
 
       expect(res).toBeUndefined();
       expect(onBlockReply).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it("falls back to final payloads when block reply send times out", async () => {
+    await withTempHome(async (home) => {
+      let sawAbort = false;
+      const onBlockReply = vi.fn((_, context) => {
+        return new Promise<void>((resolve) => {
+          context?.abortSignal?.addEventListener(
+            "abort",
+            () => {
+              sawAbort = true;
+              resolve();
+            },
+            { once: true },
+          );
+        });
+      });
+
+      vi.mocked(runEmbeddedPiAgent).mockImplementation(async (params) => {
+        void params.onBlockReply?.({ text: "streamed" });
+        return {
+          payloads: [{ text: "final" }],
+          meta: {
+            durationMs: 5,
+            agentMeta: { sessionId: "s", provider: "p", model: "m" },
+          },
+        };
+      });
+
+      const replyPromise = getReplyFromConfig(
+        {
+          Body: "ping",
+          From: "+1004",
+          To: "+2000",
+          MessageSid: "msg-126",
+          Provider: "telegram",
+        },
+        {
+          onBlockReply,
+          blockReplyTimeoutMs: 10,
+        },
+        {
+          agents: {
+            defaults: {
+              model: "anthropic/claude-opus-4-5",
+              workspace: path.join(home, "clawd"),
+            },
+          },
+          telegram: { allowFrom: ["*"] },
+          session: { store: path.join(home, "sessions.json") },
+        },
+      );
+
+      const res = await replyPromise;
+      expect(res).toMatchObject({ text: "final" });
+      expect(sawAbort).toBe(true);
     });
   });
 });

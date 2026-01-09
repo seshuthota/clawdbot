@@ -9,7 +9,11 @@ import {
   shouldEnableShellEnvFallback,
 } from "../infra/shell-env.js";
 import {
-  applyIdentityDefaults,
+  DuplicateAgentDirError,
+  findDuplicateAgentDirs,
+} from "./agent-dirs.js";
+import {
+  applyContextPruningDefaults,
   applyLoggingDefaults,
   applyMessageDefaults,
   applyModelDefaults,
@@ -37,6 +41,7 @@ const SHELL_ENV_EXPECTED_KEYS = [
   "ANTHROPIC_OAUTH_TOKEN",
   "GEMINI_API_KEY",
   "ZAI_API_KEY",
+  "OPENROUTER_API_KEY",
   "MINIMAX_API_KEY",
   "ELEVENLABS_API_KEY",
   "TELEGRAM_BOT_TOKEN",
@@ -59,6 +64,45 @@ export type ConfigIoDeps = {
   configPath?: string;
   logger?: Pick<typeof console, "error" | "warn">;
 };
+
+function warnOnConfigMiskeys(
+  raw: unknown,
+  logger: Pick<typeof console, "warn">,
+): void {
+  if (!raw || typeof raw !== "object") return;
+  const gateway = (raw as Record<string, unknown>).gateway;
+  if (!gateway || typeof gateway !== "object") return;
+  if ("token" in (gateway as Record<string, unknown>)) {
+    logger.warn(
+      'Config uses "gateway.token". This key is ignored; use "gateway.auth.token" instead.',
+    );
+  }
+}
+
+function applyConfigEnv(cfg: ClawdbotConfig, env: NodeJS.ProcessEnv): void {
+  const envConfig = cfg.env;
+  if (!envConfig) return;
+
+  const entries: Record<string, string> = {};
+
+  if (envConfig.vars) {
+    for (const [key, value] of Object.entries(envConfig.vars)) {
+      if (!value) continue;
+      entries[key] = value;
+    }
+  }
+
+  for (const [key, value] of Object.entries(envConfig)) {
+    if (key === "shellEnv" || key === "vars") continue;
+    if (typeof value !== "string" || !value.trim()) continue;
+    entries[key] = value;
+  }
+
+  for (const [key, value] of Object.entries(entries)) {
+    if (env[key]?.trim()) continue;
+    env[key] = value;
+  }
+}
 
 function resolveConfigPathForDeps(deps: Required<ConfigIoDeps>): string {
   if (deps.configPath) return deps.configPath;
@@ -107,6 +151,7 @@ export function createConfigIO(overrides: ConfigIoDeps = {}) {
       }
       const raw = deps.fs.readFileSync(configPath, "utf-8");
       const parsed = deps.json5.parse(raw);
+      warnOnConfigMiskeys(parsed, deps.logger);
       if (typeof parsed !== "object" || parsed === null) return {};
       const validated = ClawdbotSchema.safeParse(parsed);
       if (!validated.success) {
@@ -118,15 +163,25 @@ export function createConfigIO(overrides: ConfigIoDeps = {}) {
       }
       const cfg = applyMinimaxDefaults(
         applyModelDefaults(
-          applySessionDefaults(
-            applyLoggingDefaults(
-              applyMessageDefaults(
-                applyIdentityDefaults(validated.data as ClawdbotConfig),
+          applyContextPruningDefaults(
+            applySessionDefaults(
+              applyLoggingDefaults(
+                applyMessageDefaults(validated.data as ClawdbotConfig),
               ),
             ),
           ),
         ),
       );
+
+      const duplicates = findDuplicateAgentDirs(cfg, {
+        env: deps.env,
+        homedir: deps.homedir,
+      });
+      if (duplicates.length > 0) {
+        throw new DuplicateAgentDirError(duplicates);
+      }
+
+      applyConfigEnv(cfg, deps.env);
 
       const enabled =
         shouldEnableShellEnvFallback(deps.env) ||
@@ -145,6 +200,10 @@ export function createConfigIO(overrides: ConfigIoDeps = {}) {
 
       return cfg;
     } catch (err) {
+      if (err instanceof DuplicateAgentDirError) {
+        deps.logger.error(err.message);
+        throw err;
+      }
       deps.logger.error(`Failed to read config at ${configPath}`, err);
       return {};
     }
@@ -154,7 +213,11 @@ export function createConfigIO(overrides: ConfigIoDeps = {}) {
     const exists = deps.fs.existsSync(configPath);
     if (!exists) {
       const config = applyTalkApiKey(
-        applyModelDefaults(applySessionDefaults(applyMessageDefaults({}))),
+        applyModelDefaults(
+          applyContextPruningDefaults(
+            applySessionDefaults(applyMessageDefaults({})),
+          ),
+        ),
       );
       const legacyIssues: LegacyConfigIssue[] = [];
       return {

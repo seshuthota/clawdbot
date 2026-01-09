@@ -24,12 +24,19 @@ Use `sessions_spawn`:
 Tool params:
 - `task` (required)
 - `label?` (optional)
+- `agentId?` (optional; spawn under another agent id if allowed)
 - `model?` (optional; overrides the sub-agent model; invalid values are skipped and the sub-agent runs on the default model with a warning in the tool result)
 - `runTimeoutSeconds?` (default `0`; when set, the sub-agent run is aborted after N seconds)
 - `cleanup?` (`delete|keep`, default `keep`)
 
+Allowlist:
+- `agents.list[].subagents.allowAgents`: list of agent ids that can be targeted via `agentId` (`["*"]` to allow any). Default: only the requester agent.
+
+Discovery:
+- Use `agents_list` to see which agent ids are currently allowed for `sessions_spawn`.
+
 Auto-archive:
-- Sub-agent sessions are automatically archived after `agent.subagents.archiveAfterMinutes` (default: 60).
+- Sub-agent sessions are automatically archived after `agents.defaults.subagents.archiveAfterMinutes` (default: 60).
 - Archive uses `sessions.delete` and renames the transcript to `*.deleted.<timestamp>` (same folder).
 - `cleanup: "delete"` archives immediately after announce (still keeps the transcript via rename).
 - Auto-archive is best-effort; pending timers are lost if the gateway restarts.
@@ -60,9 +67,15 @@ Override via config:
 
 ```json5
 {
-  agent: {
+  agents: {
+    defaults: {
+      subagents: {
+        maxConcurrent: 1
+      }
+    }
+  },
+  tools: {
     subagents: {
-      maxConcurrent: 1,
       tools: {
         // deny wins
         deny: ["gateway", "cron"],
@@ -78,7 +91,7 @@ Override via config:
 
 Sub-agents use a dedicated in-process queue lane:
 - Lane name: `subagent`
-- Concurrency: `agent.subagents.maxConcurrent` (default `1`)
+- Concurrency: `agents.defaults.subagents.maxConcurrent` (default `1`)
 
 ## Limitations
 

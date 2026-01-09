@@ -5,7 +5,6 @@ read_when:
 ---
 # Remote Clawdbot (macOS ⇄ remote host)
 
-Updated: 2025-12-08
 
 This flow lets the macOS app act as a full remote control for a Clawdbot gateway running on another host (e.g. a Mac Studio). All features—health checks, Voice Wake forwarding, and Web Chat—reuse the same remote SSH configuration from *Settings → General*.
 
@@ -38,7 +37,7 @@ This flow lets the macOS app act as a full remote control for a Clawdbot gateway
 - Nodes advertise their permission state via `node.list` / `node.describe` so agents know what’s available.
 
 ## WhatsApp login flow (remote)
-- Run `clawdbot login --verbose` **on the remote host**. Scan the QR with WhatsApp on your phone.
+- Run `clawdbot providers login --verbose` **on the remote host**. Scan the QR with WhatsApp on your phone.
 - Re-run login on that host if auth expires. Health check will surface link problems.
 
 ## Troubleshooting

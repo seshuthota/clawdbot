@@ -39,8 +39,10 @@ type HookDispatchers = {
       | "discord"
       | "slack"
       | "signal"
-      | "imessage";
+      | "imessage"
+      | "msteams";
     to?: string;
+    model?: string;
     thinking?: string;
     timeoutSeconds?: number;
   }) => string;
@@ -177,6 +179,7 @@ export function createHooksRequestHandler(
             deliver: mapped.action.deliver === true,
             provider: mapped.action.provider ?? "last",
             to: mapped.action.to,
+            model: mapped.action.model,
             thinking: mapped.action.thinking,
             timeoutSeconds: mapped.action.timeoutSeconds,
           });

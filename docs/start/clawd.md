@@ -18,18 +18,26 @@ You’re putting an agent in a position to:
 Start conservative:
 - Always set `whatsapp.allowFrom` (never run open-to-the-world on your personal Mac).
 - Use a dedicated WhatsApp number for the assistant.
-- Heartbeats now default to every 30 minutes. Disable until you trust the setup by setting `agent.heartbeat.every: "0m"`.
+- Heartbeats now default to every 30 minutes. Disable until you trust the setup by setting `agents.defaults.heartbeat.every: "0m"`.
 
 ## Prerequisites
 
 - Node **22+**
-- CLAWDBOT available on PATH (recommended during development: from source + global link)
+- CLAWDBOT available on PATH (recommended: global install)
 - A second phone number (SIM/eSIM/prepaid) for the assistant
 
-From source (recommended while the npm package is still settling):
+```bash
+npm install -g clawdbot@latest
+# or: pnpm add -g clawdbot@latest
+```
+
+From source (development):
 
 ```bash
+git clone https://github.com/clawdbot/clawdbot.git
+cd clawdbot
 pnpm install
+pnpm ui:build # auto-installs UI deps on first run
 pnpm build
 pnpm link --global
 ```
@@ -60,7 +68,7 @@ If you link your personal WhatsApp to CLAWDBOT, every message to you becomes “
 1) Pair WhatsApp Web (shows QR; scan with the assistant phone):
 
 ```bash
-clawdbot login
+clawdbot providers login
 ```
 
 2) Start the Gateway (leave it running):
@@ -95,7 +103,7 @@ clawdbot setup
 
 Full workspace layout + backup guide: [`docs/agent-workspace.md`](/concepts/agent-workspace)
 
-Optional: choose a different workspace with `agent.workspace` (supports `~`).
+Optional: choose a different workspace with `agents.defaults.workspace` (supports `~`).
 
 ```json5
 {
@@ -165,9 +173,9 @@ Example:
 
 By default, CLAWDBOT runs a heartbeat every 30 minutes with the prompt:
 `Read HEARTBEAT.md if exists. Consider outstanding tasks. Checkup sometimes on your human during (user local) day time.`
-Set `agent.heartbeat.every: "0m"` to disable.
+Set `agents.defaults.heartbeat.every: "0m"` to disable.
 
-- If the agent replies with `HEARTBEAT_OK` (optionally with short padding; see `agent.heartbeat.ackMaxChars`), CLAWDBOT suppresses outbound delivery for that heartbeat.
+- If the agent replies with `HEARTBEAT_OK` (optionally with short padding; see `agents.defaults.heartbeat.ackMaxChars`), CLAWDBOT suppresses outbound delivery for that heartbeat.
 - Heartbeats run full agent turns — shorter intervals burn more tokens.
 
 ```json5

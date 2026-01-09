@@ -61,3 +61,6 @@ memory.md
 test.html
 temp/
 latest.json
+
+# Local untracked files
+.local/
