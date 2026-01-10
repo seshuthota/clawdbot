@@ -112,13 +112,23 @@ bash workdir:~/project background:true command:"claude \"Your task\""
 
 ---
 
-## OpenCode
+## OpenCode (Official Docs: https://opencode.ai/docs/cli/)
+
+**Best for:** Complex algorithmic tasks, long-running builds, and robust sub-agent orchestration.
 
 ```bash
-bash workdir:~/project background:true command:"opencode run \"Your task\""
+# Basic run (Use MiniMax as Google auth is missing)
+bash workdir:~/project background:true command:"opencode run --model minimax/MiniMax-M2.1 \"Your task\""
+
+# Continue existing session
+opencode run --continue "Follow-up prompt"
+
+# Attach to running server
+opencode serve  # Start server first
+opencode run --attach http://localhost:4096 "Your prompt"
 ```
 
----
+**Note:** For complex multi-part tasks, use the **Executive Monitor** skill to orchestrate multiple OpenCode agents in parallel.
 
 ## Pi Coding Agent
 

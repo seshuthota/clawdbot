@@ -1,0 +1,30 @@
+{
+    "jobs": [
+        {
+            "id": "executive-monitor-reflection",
+            "name": "Nightly Reflection",
+            "schedule": "0 2 * * *",
+            "payload": {
+                "kind": "agentTurn",
+                "message": "Executive Monitor: Perform autonomous reflection. 1. Read memory.md and recent commits. 2. Identify if any project status or technical learnings are missing. 3. Update memory.md with a 'Reflective Summary'.",
+                "thinking": "high",
+                "deliver": true,
+                "provider": "last",
+                "to": "last"
+            }
+        },
+        {
+            "id": "executive-monitor-integrity",
+            "name": "Weekly Integrity Audit",
+            "schedule": "0 0 * * 0",
+            "payload": {
+                "kind": "agentTurn",
+                "message": "Executive Monitor: Run a full integrity audit. Check for broken tests, outdated README paths, and stale TODOs. Report findings and propose fixes if trivial.",
+                "thinking": "high",
+                "deliver": true,
+                "provider": "last",
+                "to": "last"
+            }
+        }
+    ]
+}

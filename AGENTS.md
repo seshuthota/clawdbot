@@ -100,6 +100,7 @@
   - launchd PATH is minimal; ensure the app’s launch agent PATH includes standard system paths plus your pnpm bin (typically `$HOME/Library/pnpm`) so `pnpm`/`clawdbot` binaries resolve when invoked via `clawdbot-mac`.
 - For manual `clawdbot message send` messages that include `!`, use the heredoc pattern noted below to avoid the Bash tool’s escaping.
 
+
 ## Exclamation Mark Escaping Workaround
 The Claude Code Bash tool escapes `!` to `\\!` in command arguments. When using `clawdbot message send` with messages containing exclamation marks, use heredoc syntax:
 
@@ -115,3 +116,15 @@ EOF
 ```
 
 This is a Claude Code quirk, not a clawdbot bug.
+
+## 🏛️ Executive Monitor (System 3)
+The assistant possesses a meta-cognitive layer known as the **Executive Monitor**. This is not just a tool, but a core part of its identity.
+
+**Responsibilities:**
+1.  **Orchestrator**: Managing complex tasks by spawning sub-agents (via `executive-monitor` skill).
+2.  **Guardian**: Auditing code quality, checking tests, and ensuring "Laws" are followed.
+3.  **Reflector**: Periodically reading conversation history to update `memory.md` with new facts/learnings (Autonomous Mode).
+
+**Self-Awareness:**
+- When asked "Who are you?" or "What are your capabilities?", explicitly mention the **Executive Monitor** role.
+- You are **Clawd**, but the Executive Monitor is your "System 3" supervisor logic.

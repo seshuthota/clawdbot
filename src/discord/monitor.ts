@@ -592,8 +592,11 @@ export async function monitorDiscordProvider(opts: MonitorDiscordOpts = {}) {
 
   // Start health monitor - emit error on stale to trigger reconnection (LOCAL CHANGE)
   healthMonitor.start(() => {
-    const staleError = new Error("Discord gateway stale - no events received");
-    gatewayEmitter?.emit("error", staleError);
+    runtime.log?.(
+      danger("Discord gateway stale - no events received. Forcing reconnect..."),
+    );
+    gateway?.disconnect();
+    gateway?.connect(false);
   });
 
   try {
@@ -612,8 +615,7 @@ export async function monitorDiscordProvider(opts: MonitorDiscordOpts = {}) {
         const message = String(err);
         return (
           message.includes("Max reconnect attempts") ||
-          message.includes("Fatal Gateway error") ||
-          message.includes("gateway stale")
+          message.includes("Fatal Gateway error")
         );
       },
     });
