@@ -3,6 +3,7 @@ import {
   resolveAgentDir,
   resolveDefaultAgentId,
   resolveSessionAgentId,
+  resolveAgentIdFromSessionKey,
 } from "../../agents/agent-scope.js";
 import {
   isProfileInCooldown,
