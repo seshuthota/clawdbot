@@ -1202,7 +1202,7 @@ export type ModelDefinitionConfig = {
 
 export type ModelProviderConfig = {
   baseUrl: string;
-  apiKey: string;
+  apiKey?: string;
   api?: ModelApi;
   headers?: Record<string, string>;
   authHeader?: boolean;

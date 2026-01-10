@@ -251,8 +251,8 @@ Controls how WhatsApp direct chats (DMs) are handled:
 Pairing codes expire after 1 hour; the bot only sends a pairing code when a new request is created. Pending DM pairing requests are capped at **3 per provider** by default.
 
 Pairing approvals:
-- `clawdbot pairing list --provider whatsapp`
-- `clawdbot pairing approve --provider whatsapp <code>`
+- `clawdbot pairing list whatsapp`
+- `clawdbot pairing approve whatsapp <code>`
 
 ### `whatsapp.allowFrom`
 
@@ -1490,6 +1490,8 @@ Notes:
 
 Z.AI models are available via the built-in `zai` provider. Set `ZAI_API_KEY`
 in your environment and reference the model by provider/model.
+
+Shortcut: `clawdbot onboard --auth-choice zai-api-key`.
 
 ```json5
 {
