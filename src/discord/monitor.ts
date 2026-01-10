@@ -2428,15 +2428,7 @@ async function sendTyping(params: { client: Client; channelId: string }) {
   try {
     const channel = await params.client.fetchChannel(params.channelId);
     if (!channel) return;
-    // Guild channels have triggerTyping method
-    if (
-      "triggerTyping" in channel &&
-      typeof channel.triggerTyping === "function"
-    ) {
-      await channel.triggerTyping();
-      return;
-    }
-    // DM channels don't have triggerTyping - call REST API directly
+    // Always call REST API directly for consistent behavior across DMs and Guilds
     await params.client.rest.post(Routes.channelTyping(params.channelId), {});
   } catch (err) {
     logVerbose(
