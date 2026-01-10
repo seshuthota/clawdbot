@@ -111,6 +111,59 @@ type DiscordThreadStarter = {
 
 const DISCORD_THREAD_STARTER_CACHE = new Map<string, DiscordThreadStarter>();
 const DISCORD_SLOW_LISTENER_THRESHOLD_MS = 1000;
+const DISCORD_HEALTH_CHECK_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
+const DISCORD_STALE_THRESHOLD_MS = 10 * 60 * 1000; // 10 minutes
+
+/**
+ * Monitors Discord gateway health by tracking event activity.
+ * If no events are received for DISCORD_STALE_THRESHOLD_MS, the connection
+ * is considered stale and may need to be restarted.
+ */
+class DiscordHealthMonitor {
+  private lastActivityTime: number = Date.now();
+  private watchdogTimer: NodeJS.Timeout | undefined;
+  private onStaleCallback: (() => void) | undefined;
+  private stopped = false;
+
+  constructor(private log?: (message: string) => void) { }
+
+  /** Call this whenever a Discord event is received */
+  recordActivity() {
+    this.lastActivityTime = Date.now();
+  }
+
+  /** Start the watchdog timer */
+  start(onStale: () => void) {
+    this.onStaleCallback = onStale;
+    this.stopped = false;
+    this.lastActivityTime = Date.now();
+    this.watchdogTimer = setInterval(() => {
+      this.checkHealth();
+    }, DISCORD_HEALTH_CHECK_INTERVAL_MS);
+    this.log?.("discord health monitor started");
+  }
+
+  /** Stop the watchdog timer */
+  stop() {
+    this.stopped = true;
+    if (this.watchdogTimer) {
+      clearInterval(this.watchdogTimer);
+      this.watchdogTimer = undefined;
+    }
+  }
+
+  private checkHealth() {
+    if (this.stopped) return;
+    const inactiveMs = Date.now() - this.lastActivityTime;
+    const inactiveMinutes = Math.round(inactiveMs / 60_000);
+    if (inactiveMs > DISCORD_STALE_THRESHOLD_MS) {
+      this.log?.(
+        `discord gateway appears stale (no activity for ${inactiveMinutes} minutes) - triggering reconnect`,
+      );
+      this.onStaleCallback?.();
+    }
+  }
+}
 
 function logSlowDiscordListener(params: {
   logger: ReturnType<typeof getChildLogger> | undefined;
@@ -388,7 +441,11 @@ export async function monitorDiscordProvider(opts: MonitorDiscordOpts = {}) {
     guildEntries,
   });
 
-  client.listeners.push(new DiscordMessageListener(messageHandler, logger));
+  // Create health monitor to detect stale gateway connections
+  const healthMonitor = new DiscordHealthMonitor(runtime.log);
+  const onActivity = () => healthMonitor.recordActivity();
+
+  client.listeners.push(new DiscordMessageListener(messageHandler, logger, onActivity));
   client.listeners.push(
     new DiscordReactionListener({
       cfg,
@@ -397,6 +454,7 @@ export async function monitorDiscordProvider(opts: MonitorDiscordOpts = {}) {
       botUserId,
       guildEntries,
       logger,
+      onActivity,
     }),
   );
   client.listeners.push(
@@ -407,6 +465,7 @@ export async function monitorDiscordProvider(opts: MonitorDiscordOpts = {}) {
       botUserId,
       guildEntries,
       logger,
+      onActivity,
     }),
   );
 
@@ -420,13 +479,20 @@ export async function monitorDiscordProvider(opts: MonitorDiscordOpts = {}) {
   if (shouldLogVerbose()) {
     gatewayEmitter?.on("warning", onGatewayWarning);
   }
+
+  // Start health monitor - emit error on stale to trigger reconnection
+  healthMonitor.start(() => {
+    const staleError = new Error("Discord gateway stale - no events received");
+    gatewayEmitter?.emit("error", staleError);
+  });
+
   try {
     await waitForDiscordGatewayStop({
       gateway: gateway
         ? {
-            emitter: gatewayEmitter,
-            disconnect: () => gateway.disconnect(),
-          }
+          emitter: gatewayEmitter,
+          disconnect: () => gateway.disconnect(),
+        }
         : undefined,
       abortSignal: opts.abortSignal,
       onGatewayError: (err) => {
@@ -436,11 +502,13 @@ export async function monitorDiscordProvider(opts: MonitorDiscordOpts = {}) {
         const message = String(err);
         return (
           message.includes("Max reconnect attempts") ||
-          message.includes("Fatal Gateway error")
+          message.includes("Fatal Gateway error") ||
+          message.includes("gateway stale")
         );
       },
     });
   } finally {
+    healthMonitor.stop();
     gatewayEmitter?.removeListener("warning", onGatewayWarning);
   }
 }
@@ -546,10 +614,10 @@ export function createDiscordMessageHandler(params: {
           ]);
           const permitted = allowList
             ? allowListMatches(allowList, {
-                id: author.id,
-                name: author.username,
-                tag: formatDiscordUserTag(author),
-              })
+              id: author.id,
+              name: author.username,
+              tag: formatDiscordUserTag(author),
+            })
             : false;
           if (!permitted) {
             commandAuthorized = false;
@@ -614,7 +682,7 @@ export function createDiscordMessageHandler(params: {
         !isDirectMessage &&
         (Boolean(
           botId &&
-            message.mentionedUsers?.some((user: User) => user.id === botId),
+          message.mentionedUsers?.some((user: User) => user.id === botId),
         ) ||
           matchesMentionPatterns(baseText, mentionRegexes));
       if (shouldLogVerbose()) {
@@ -634,9 +702,9 @@ export function createDiscordMessageHandler(params: {
 
       const guildInfo = isGuildMessage
         ? resolveDiscordGuildEntry({
-            guild: data.guild ?? undefined,
-            guildEntries,
-          })
+          guild: data.guild ?? undefined,
+          guildEntries,
+        })
         : null;
       if (
         isGuildMessage &&
@@ -653,8 +721,8 @@ export function createDiscordMessageHandler(params: {
       const channelName =
         channelInfo?.name ??
         ((isGuildMessage || isGroupDm) &&
-        message.channel &&
-        "name" in message.channel
+          message.channel &&
+          "name" in message.channel
           ? message.channel.name
           : undefined);
       const isThreadChannel =
@@ -684,11 +752,11 @@ export function createDiscordMessageHandler(params: {
       const baseSessionKey = route.sessionKey;
       const channelConfig = isGuildMessage
         ? resolveDiscordChannelConfig({
-            guildInfo,
-            channelId: threadParentId ?? message.channelId,
-            channelName: configChannelName,
-            channelSlug: configChannelSlug,
-          })
+          guildInfo,
+          channelId: threadParentId ?? message.channelId,
+          channelName: configChannelName,
+          channelSlug: configChannelSlug,
+        })
         : null;
       if (isGuildMessage && channelConfig?.enabled === false) {
         logVerbose(
@@ -761,9 +829,9 @@ export function createDiscordMessageHandler(params: {
         channelConfig?.requireMention ?? guildInfo?.requireMention ?? true;
       const hasAnyMention = Boolean(
         !isDirectMessage &&
-          (message.mentionedEveryone ||
-            (message.mentionedUsers?.length ?? 0) > 0 ||
-            (message.mentionedRoles?.length ?? 0) > 0),
+        (message.mentionedEveryone ||
+          (message.mentionedUsers?.length ?? 0) > 0 ||
+          (message.mentionedRoles?.length ?? 0) > 0),
       );
       if (!isDirectMessage) {
         commandAuthorized = resolveDiscordCommandAuthorized({
@@ -870,10 +938,10 @@ export function createDiscordMessageHandler(params: {
       const fromLabel = isDirectMessage
         ? buildDirectLabel(author)
         : buildGuildLabel({
-            guild: data.guild ?? undefined,
-            channelName: channelName ?? message.channelId,
-            channelId: message.channelId,
-          });
+          guild: data.guild ?? undefined,
+          channelName: channelName ?? message.channelId,
+          channelId: message.channelId,
+        });
       const groupRoom =
         isGuildMessage && displayChannelSlug
           ? `#${displayChannelSlug}`
@@ -1046,7 +1114,7 @@ export function createDiscordMessageHandler(params: {
               danger(`discord ${info.kind} reply failed: ${String(err)}`),
             );
           },
-          onReplyStart: () => sendTyping(message),
+          onReplyStart: () => sendTyping({ client, channelId: message.channelId }),
         });
 
       const { queuedFinal, counts } = await dispatchReplyFromConfig({
@@ -1092,11 +1160,13 @@ class DiscordMessageListener extends MessageCreateListener {
   constructor(
     private handler: DiscordMessageHandler,
     private logger?: ReturnType<typeof getChildLogger>,
+    private onActivity?: () => void,
   ) {
     super();
   }
 
   async handle(data: DiscordMessageEvent, client: Client) {
+    this.onActivity?.();
     const startedAt = Date.now();
     try {
       await this.handler(data, client);
@@ -1120,12 +1190,14 @@ class DiscordReactionListener extends MessageReactionAddListener {
       botUserId?: string;
       guildEntries?: Record<string, DiscordGuildEntryResolved>;
       logger: ReturnType<typeof getChildLogger>;
+      onActivity?: () => void;
     },
   ) {
     super();
   }
 
   async handle(data: DiscordReactionEvent, client: Client) {
+    this.params.onActivity?.();
     const startedAt = Date.now();
     try {
       await handleDiscordReactionEvent({
@@ -1158,12 +1230,14 @@ class DiscordReactionRemoveListener extends MessageReactionRemoveListener {
       botUserId?: string;
       guildEntries?: Record<string, DiscordGuildEntryResolved>;
       logger: ReturnType<typeof getChildLogger>;
+      onActivity?: () => void;
     },
   ) {
     super();
   }
 
   async handle(data: DiscordReactionEvent, client: Client) {
+    this.params.onActivity?.();
     const startedAt = Date.now();
     try {
       await handleDiscordReactionEvent({
@@ -1303,13 +1377,13 @@ function createDiscordNativeCommand(params: {
     ephemeral = ephemeralDefault;
     options = command.acceptsArgs
       ? ([
-          {
-            name: "input",
-            description: "Command input",
-            type: ApplicationCommandOptionType.String,
-            required: false,
-          },
-        ] satisfies CommandOptions)
+        {
+          name: "input",
+          description: "Command input",
+          type: ApplicationCommandOptionType.String,
+          required: false,
+        },
+      ] satisfies CommandOptions)
       : undefined;
 
     async run(interaction: CommandInteraction) {
@@ -1335,11 +1409,11 @@ function createDiscordNativeCommand(params: {
       });
       const channelConfig = interaction.guild
         ? resolveDiscordChannelConfig({
-            guildInfo,
-            channelId: channel?.id ?? "",
-            channelName,
-            channelSlug,
-          })
+          guildInfo,
+          channelId: channel?.id ?? "",
+          channelName,
+          channelSlug,
+        })
         : null;
       if (channelConfig?.enabled === false) {
         await interaction.reply({
@@ -1392,10 +1466,10 @@ function createDiscordNativeCommand(params: {
           ]);
           const permitted = allowList
             ? allowListMatches(allowList, {
-                id: user.id,
-                name: user.username,
-                tag: formatDiscordUserTag(user),
-              })
+              id: user.id,
+              name: user.username,
+              tag: formatDiscordUserTag(user),
+            })
             : false;
           if (!permitted) {
             commandAuthorized = false;
@@ -1475,21 +1549,21 @@ function createDiscordNativeCommand(params: {
         GroupSubject: isGuild ? interaction.guild?.name : undefined,
         GroupSystemPrompt: isGuild
           ? (() => {
-              const channelTopic =
-                channel && "topic" in channel
-                  ? (channel.topic ?? undefined)
-                  : undefined;
-              const channelDescription = channelTopic?.trim();
-              const systemPromptParts = [
-                channelDescription
-                  ? `Channel topic: ${channelDescription}`
-                  : null,
-                channelConfig?.systemPrompt?.trim() || null,
-              ].filter((entry): entry is string => Boolean(entry));
-              return systemPromptParts.length > 0
-                ? systemPromptParts.join("\n\n")
+            const channelTopic =
+              channel && "topic" in channel
+                ? (channel.topic ?? undefined)
                 : undefined;
-            })()
+            const channelDescription = channelTopic?.trim();
+            const systemPromptParts = [
+              channelDescription
+                ? `Channel topic: ${channelDescription}`
+                : null,
+              channelConfig?.systemPrompt?.trim() || null,
+            ].filter((entry): entry is string => Boolean(entry));
+            return systemPromptParts.length > 0
+              ? systemPromptParts.join("\n\n")
+              : undefined;
+          })()
           : undefined,
         SenderName: user.globalName ?? user.username,
         SenderId: user.id,
@@ -1566,15 +1640,15 @@ async function deliverDiscordInteractionReply(params: {
     const payload =
       files && files.length > 0
         ? {
-            content,
-            files: files.map((file) => {
-              if (file.data instanceof Blob) {
-                return { name: file.name, data: file.data };
-              }
-              const arrayBuffer = Uint8Array.from(file.data).buffer;
-              return { name: file.name, data: new Blob([arrayBuffer]) };
-            }),
-          }
+          content,
+          files: files.map((file) => {
+            if (file.data instanceof Blob) {
+              return { name: file.name, data: file.data };
+            }
+            const arrayBuffer = Uint8Array.from(file.data).buffer;
+            return { name: file.name, data: new Blob([arrayBuffer]) };
+          }),
+        }
         : { content };
     if (!preferFollowUp && !hasReplied) {
       await interaction.reply(payload);
@@ -2175,12 +2249,16 @@ async function sendTyping(params: { client: Client; channelId: string }) {
   try {
     const channel = await params.client.fetchChannel(params.channelId);
     if (!channel) return;
+    // Guild channels have triggerTyping method
     if (
       "triggerTyping" in channel &&
       typeof channel.triggerTyping === "function"
     ) {
       await channel.triggerTyping();
+      return;
     }
+    // DM channels don't have triggerTyping - call REST API directly
+    await params.client.rest.post(Routes.channelTyping(params.channelId), {});
   } catch (err) {
     logVerbose(
       `discord typing cue failed for channel ${params.channelId}: ${String(err)}`,
