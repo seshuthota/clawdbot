@@ -1,16 +1,32 @@
 import { isMessagingToolDuplicate } from "../../agents/pi-embedded-helpers.js";
 import type { MessagingToolSend } from "../../agents/pi-embedded-runner.js";
+import type { ReplyToMode } from "../../config/types.js";
+import type { OriginatingChannelType } from "../templating.js";
 import type { ReplyPayload } from "../types.js";
 import { extractReplyToTag } from "./reply-tags.js";
-
-export type ReplyToModeFilter = (payload: ReplyPayload) => ReplyPayload;
+import { createReplyToModeFilterForChannel } from "./reply-threading.js";
 
 export function applyReplyTagsToPayload(
   payload: ReplyPayload,
   currentMessageId?: string,
 ): ReplyPayload {
-  if (typeof payload.text !== "string") return payload;
-  const { cleaned, replyToId } = extractReplyToTag(
+  if (typeof payload.text !== "string") {
+    if (!payload.replyToCurrent || payload.replyToId) return payload;
+    return {
+      ...payload,
+      replyToId: currentMessageId?.trim() || undefined,
+    };
+  }
+  const shouldParseTags = payload.text.includes("[[");
+  if (!shouldParseTags) {
+    if (!payload.replyToCurrent || payload.replyToId) return payload;
+    return {
+      ...payload,
+      replyToId: currentMessageId?.trim() || undefined,
+      replyToTag: payload.replyToTag ?? true,
+    };
+  }
+  const { cleaned, replyToId, replyToCurrent, hasTag } = extractReplyToTag(
     payload.text,
     currentMessageId,
   );
@@ -18,6 +34,8 @@ export function applyReplyTagsToPayload(
     ...payload,
     text: cleaned ? cleaned : undefined,
     replyToId: replyToId ?? payload.replyToId,
+    replyToTag: hasTag || payload.replyToTag,
+    replyToCurrent: replyToCurrent || payload.replyToCurrent,
   };
 }
 
@@ -31,10 +49,15 @@ export function isRenderablePayload(payload: ReplyPayload): boolean {
 
 export function applyReplyThreading(params: {
   payloads: ReplyPayload[];
-  applyReplyToMode: ReplyToModeFilter;
+  replyToMode: ReplyToMode;
+  replyToChannel?: OriginatingChannelType;
   currentMessageId?: string;
 }): ReplyPayload[] {
-  const { payloads, applyReplyToMode, currentMessageId } = params;
+  const { payloads, replyToMode, replyToChannel, currentMessageId } = params;
+  const applyReplyToMode = createReplyToModeFilterForChannel(
+    replyToMode,
+    replyToChannel,
+  );
   return payloads
     .map((payload) => applyReplyTagsToPayload(payload, currentMessageId))
     .filter(isRenderablePayload)

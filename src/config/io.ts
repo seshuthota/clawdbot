@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -27,6 +28,7 @@ import {
   resolveConfigPath,
   resolveStateDir,
 } from "./paths.js";
+import { applyConfigOverrides } from "./runtime-overrides.js";
 import type {
   ClawdbotConfig,
   ConfigFileSnapshot,
@@ -198,7 +200,7 @@ export function createConfigIO(overrides: ConfigIoDeps = {}) {
         });
       }
 
-      return cfg;
+      return applyConfigOverrides(cfg);
     } catch (err) {
       if (err instanceof DuplicateAgentDirError) {
         deps.logger.error(err.message);
@@ -297,13 +299,48 @@ export function createConfigIO(overrides: ConfigIoDeps = {}) {
   }
 
   async function writeConfigFile(cfg: ClawdbotConfig) {
-    await deps.fs.promises.mkdir(path.dirname(configPath), {
-      recursive: true,
-    });
+    const dir = path.dirname(configPath);
+    await deps.fs.promises.mkdir(dir, { recursive: true, mode: 0o700 });
     const json = JSON.stringify(applyModelDefaults(cfg), null, 2)
       .trimEnd()
       .concat("\n");
-    await deps.fs.promises.writeFile(configPath, json, "utf-8");
+
+    const tmp = path.join(
+      dir,
+      `${path.basename(configPath)}.${process.pid}.${crypto.randomUUID()}.tmp`,
+    );
+
+    await deps.fs.promises.writeFile(tmp, json, {
+      encoding: "utf-8",
+      mode: 0o600,
+    });
+
+    await deps.fs.promises
+      .copyFile(configPath, `${configPath}.bak`)
+      .catch(() => {
+        // best-effort
+      });
+
+    try {
+      await deps.fs.promises.rename(tmp, configPath);
+    } catch (err) {
+      const code = (err as { code?: string }).code;
+      // Windows doesn't reliably support atomic replace via rename when dest exists.
+      if (code === "EPERM" || code === "EEXIST") {
+        await deps.fs.promises.copyFile(tmp, configPath);
+        await deps.fs.promises.chmod(configPath, 0o600).catch(() => {
+          // best-effort
+        });
+        await deps.fs.promises.unlink(tmp).catch(() => {
+          // best-effort
+        });
+        return;
+      }
+      await deps.fs.promises.unlink(tmp).catch(() => {
+        // best-effort
+      });
+      throw err;
+    }
   }
 
   return {

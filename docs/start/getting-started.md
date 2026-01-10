@@ -48,7 +48,12 @@ Windows: use **WSL2** (Ubuntu recommended). WSL2 is strongly recommended; native
 
 ```bash
 npm install -g clawdbot@latest
-# or: pnpm add -g clawdbot@latest
+```
+
+Or:
+
+```bash
+pnpm add -g clawdbot@latest
 ```
 
 ## 2) Run the onboarding wizard (and install the daemon)
@@ -59,7 +64,7 @@ clawdbot onboard --install-daemon
 
 What you’ll choose:
 - **Local vs Remote** gateway
-- **Auth**: Anthropic OAuth or OpenAI OAuth (recommended), API key (optional), or skip for now
+- **Auth**: **Anthropic OAuth via Claude CLI setup-token (preferred)**, OpenAI OAuth (recommended), API key (optional), or skip for now
 - **Providers**: WhatsApp QR login, Telegram/Discord bot tokens, etc.
 - **Daemon**: background install (launchd/systemd; WSL2 uses systemd)
   - **Runtime**: Node (recommended; required for WhatsApp) or Bun (faster, but incompatible with WhatsApp)
@@ -67,6 +72,8 @@ What you’ll choose:
 Wizard doc: [Wizard](/start/wizard)
 
 ### Auth: where it lives (important)
+
+- **Preferred Anthropic path:** install Claude CLI on the gateway host and run `claude setup-token`. The wizard can reuse it, and `clawdbot models status` will sync it into Clawdbot auth profiles.
 
 - OAuth credentials (legacy import): `~/.clawdbot/credentials/oauth.json`
 - Auth profiles (OAuth + API keys): `~/.clawdbot/agents/<agentId>/agent/auth-profiles.json`

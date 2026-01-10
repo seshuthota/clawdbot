@@ -2,6 +2,7 @@ import {
   resolveAgentConfig,
   resolveAgentDir,
   resolveDefaultAgentId,
+  resolveSessionAgentId,
 } from "../../agents/agent-scope.js";
 import {
   isProfileInCooldown,
@@ -31,12 +32,12 @@ import {
 import { resolveSandboxConfigForAgent } from "../../agents/sandbox.js";
 import type { ClawdbotConfig } from "../../config/config.js";
 import {
-  resolveAgentIdFromSessionKey,
   resolveAgentMainSessionKey,
   type SessionEntry,
   saveSessionStore,
 } from "../../config/sessions.js";
 import { enqueueSystemEvent } from "../../infra/system-events.js";
+import { applyVerboseOverride } from "../../sessions/level-overrides.js";
 import { shortenHomePath } from "../../utils.js";
 import { extractModelDirective } from "../model.js";
 import type { MsgContext } from "../templating.js";
@@ -88,7 +89,9 @@ const resolveAuthLabel = async (
   mode: ModelAuthDetailMode = "compact",
 ): Promise<{ label: string; source: string }> => {
   const formatPath = (value: string) => shortenHomePath(value);
-  const store = ensureAuthProfileStore(agentDir, { allowKeychainPrompt: false });
+  const store = ensureAuthProfileStore(agentDir, {
+    allowKeychainPrompt: false,
+  });
   const order = resolveAuthProfileOrder({ cfg, store, provider });
   const providerKey = normalizeProviderId(provider);
   const lastGood = (() => {
@@ -121,7 +124,8 @@ const resolveAuthLabel = async (
       const configProfile = cfg.auth?.profiles?.[profileId];
       const missing =
         !profile ||
-        (configProfile?.provider && configProfile.provider !== profile.provider) ||
+        (configProfile?.provider &&
+          configProfile.provider !== profile.provider) ||
         (configProfile?.mode &&
           configProfile.mode !== profile.type &&
           !(configProfile.mode === "oauth" && profile.type === "token"));
@@ -170,7 +174,11 @@ const resolveAuthLabel = async (
       if (lastGood && profileId === lastGood) flags.push("lastGood");
       if (isProfileInCooldown(store, profileId)) {
         const until = store.usageStats?.[profileId]?.cooldownUntil;
-        if (typeof until === "number" && Number.isFinite(until) && until > now) {
+        if (
+          typeof until === "number" &&
+          Number.isFinite(until) &&
+          until > now
+        ) {
           flags.push(`cooldown ${formatUntil(until)}`);
         } else {
           flags.push("cooldown");
@@ -197,7 +205,11 @@ const resolveAuthLabel = async (
           Number.isFinite(profile.expires) &&
           profile.expires > 0
         ) {
-          flags.push(profile.expires <= now ? "expired" : `exp ${formatUntil(profile.expires)}`);
+          flags.push(
+            profile.expires <= now
+              ? "expired"
+              : `exp ${formatUntil(profile.expires)}`,
+          );
         }
         const suffix = flags.length > 0 ? ` (${flags.join(", ")})` : "";
         return `${profileId}=token:${maskApiKey(profile.token)}${suffix}`;
@@ -218,7 +230,11 @@ const resolveAuthLabel = async (
         Number.isFinite(profile.expires) &&
         profile.expires > 0
       ) {
-        flags.push(profile.expires <= now ? "expired" : `exp ${formatUntil(profile.expires)}`);
+        flags.push(
+          profile.expires <= now
+            ? "expired"
+            : `exp ${formatUntil(profile.expires)}`,
+        );
       }
       const suffixLabel = suffix ? ` ${suffix}` : "";
       const suffixFlags = flags.length > 0 ? ` (${flags.join(", ")})` : "";
@@ -242,7 +258,8 @@ const resolveAuthLabel = async (
   if (customKey) {
     return {
       label: maskApiKey(customKey),
-      source: mode === "verbose" ? `models.json: ${formatPath(modelsPath)}` : "",
+      source:
+        mode === "verbose" ? `models.json: ${formatPath(modelsPath)}` : "",
     };
   }
   return { label: "missing", source: "missing" };
@@ -431,7 +448,7 @@ export async function handleDirectiveOnly(params: {
   directives: InlineDirectives;
   sessionEntry?: SessionEntry;
   sessionStore?: Record<string, SessionEntry>;
-  sessionKey?: string;
+  sessionKey: string;
   storePath?: string;
   elevatedEnabled: boolean;
   elevatedAllowed: boolean;
@@ -474,15 +491,19 @@ export async function handleDirectiveOnly(params: {
     currentReasoningLevel,
     currentElevatedLevel,
   } = params;
-  const activeAgentId = params.sessionKey
-    ? resolveAgentIdFromSessionKey(params.sessionKey)
-    : resolveDefaultAgentId(params.cfg);
+  const activeAgentId = resolveSessionAgentId({
+    sessionKey: params.sessionKey,
+    config: params.cfg,
+  });
   const agentDir = resolveAgentDir(params.cfg, activeAgentId);
   const agentCfg = resolveAgentConfig(params.cfg, activeAgentId);
   const runtimeIsSandboxed = (() => {
     const sessionKey = params.sessionKey?.trim();
     if (!sessionKey) return false;
-    const agentId = resolveAgentIdFromSessionKey(sessionKey);
+    const agentId = resolveSessionAgentId({
+      sessionKey,
+      config: params.cfg,
+    });
     const sandboxCfg = resolveSandboxConfigForAgent(params.cfg, agentId);
     if (sandboxCfg.mode === "off") return false;
     const mainKey = resolveAgentMainSessionKey({
@@ -821,6 +842,7 @@ export async function handleDirectiveOnly(params: {
         enqueueSystemEvent(
           formatModelSwitchEvent(nextLabel, modelSelection.alias),
           {
+            sessionKey,
             contextKey: `model:${nextLabel}`,
           },
         );
@@ -837,8 +859,7 @@ export async function handleDirectiveOnly(params: {
       else sessionEntry.thinkingLevel = directives.thinkLevel;
     }
     if (directives.hasVerboseDirective && directives.verboseLevel) {
-      if (directives.verboseLevel === "off") delete sessionEntry.verboseLevel;
-      else sessionEntry.verboseLevel = directives.verboseLevel;
+      applyVerboseOverride(sessionEntry, directives.verboseLevel);
     }
     if (directives.hasReasoningDirective && directives.reasoningLevel) {
       if (directives.reasoningLevel === "off")
@@ -846,8 +867,9 @@ export async function handleDirectiveOnly(params: {
       else sessionEntry.reasoningLevel = directives.reasoningLevel;
     }
     if (directives.hasElevatedDirective && directives.elevatedLevel) {
-      if (directives.elevatedLevel === "off") delete sessionEntry.elevatedLevel;
-      else sessionEntry.elevatedLevel = directives.elevatedLevel;
+      // Unlike other toggles, elevated defaults can be "on".
+      // Persist "off" explicitly so `/elevated off` actually overrides defaults.
+      sessionEntry.elevatedLevel = directives.elevatedLevel;
     }
     if (modelSelection) {
       if (modelSelection.isDefault) {
@@ -961,6 +983,7 @@ export async function persistInlineDirectives(params: {
   directives: InlineDirectives;
   effectiveModelDirective?: string;
   cfg: ClawdbotConfig;
+  agentDir?: string;
   sessionEntry?: SessionEntry;
   sessionStore?: Record<string, SessionEntry>;
   sessionKey?: string;
@@ -995,6 +1018,10 @@ export async function persistInlineDirectives(params: {
     agentCfg,
   } = params;
   let { provider, model } = params;
+  const activeAgentId = sessionKey
+    ? resolveSessionAgentId({ sessionKey, config: cfg })
+    : resolveDefaultAgentId(cfg);
+  const agentDir = resolveAgentDir(cfg, activeAgentId);
 
   if (sessionEntry && sessionStore && sessionKey) {
     let updated = false;
@@ -1007,11 +1034,7 @@ export async function persistInlineDirectives(params: {
       updated = true;
     }
     if (directives.hasVerboseDirective && directives.verboseLevel) {
-      if (directives.verboseLevel === "off") {
-        delete sessionEntry.verboseLevel;
-      } else {
-        sessionEntry.verboseLevel = directives.verboseLevel;
-      }
+      applyVerboseOverride(sessionEntry, directives.verboseLevel);
       updated = true;
     }
     if (directives.hasReasoningDirective && directives.reasoningLevel) {
@@ -1028,11 +1051,8 @@ export async function persistInlineDirectives(params: {
       elevatedEnabled &&
       elevatedAllowed
     ) {
-      if (directives.elevatedLevel === "off") {
-        delete sessionEntry.elevatedLevel;
-      } else {
-        sessionEntry.elevatedLevel = directives.elevatedLevel;
-      }
+      // Persist "off" explicitly so inline `/elevated off` overrides defaults.
+      sessionEntry.elevatedLevel = directives.elevatedLevel;
       updated = true;
     }
     const modelDirective =
@@ -1088,6 +1108,7 @@ export async function persistInlineDirectives(params: {
             enqueueSystemEvent(
               formatModelSwitchEvent(nextLabel, resolved.alias),
               {
+                sessionKey,
                 contextKey: `model:${nextLabel}`,
               },
             );

@@ -1,3 +1,4 @@
+import { resolveEffectiveMessagesConfig } from "../agents/identity.js";
 import { chunkText, resolveTextChunkLimit } from "../auto-reply/chunk.js";
 import { hasControlCommand } from "../auto-reply/command-detection.js";
 import { formatAgentEnvelope } from "../auto-reply/envelope.js";
@@ -24,6 +25,7 @@ import {
 } from "../pairing/pairing-store.js";
 import { resolveAgentRoute } from "../routing/resolve-route.js";
 import type { RuntimeEnv } from "../runtime.js";
+import { truncateUtf16Safe } from "../utils.js";
 import { resolveIMessageAccount } from "./accounts.js";
 import { createIMessageRpcClient } from "./client.js";
 import { sendMessageIMessage } from "./send.js";
@@ -168,10 +170,36 @@ export async function monitorIMessageProvider(
     const chatId = message.chat_id ?? undefined;
     const chatGuid = message.chat_guid ?? undefined;
     const chatIdentifier = message.chat_identifier ?? undefined;
-    const isGroup = Boolean(message.is_group);
+
+    const groupIdCandidate = chatId !== undefined ? String(chatId) : undefined;
+    const groupListPolicy = groupIdCandidate
+      ? resolveProviderGroupPolicy({
+          cfg,
+          provider: "imessage",
+          accountId: accountInfo.accountId,
+          groupId: groupIdCandidate,
+        })
+      : {
+          allowlistEnabled: false,
+          allowed: true,
+          groupConfig: undefined,
+          defaultConfig: undefined,
+        };
+
+    // Some iMessage threads can have multiple participants but still report
+    // is_group=false depending on how Messages stores the identifier.
+    // If the owner explicitly configures a chat_id under imessage.groups, treat
+    // that thread as a "group" for permission gating and session isolation.
+    const treatAsGroupByConfig = Boolean(
+      groupIdCandidate &&
+        groupListPolicy.allowlistEnabled &&
+        groupListPolicy.groupConfig,
+    );
+
+    const isGroup = Boolean(message.is_group) || treatAsGroupByConfig;
     if (isGroup && !chatId) return;
 
-    const groupId = isGroup ? String(chatId) : undefined;
+    const groupId = isGroup ? groupIdCandidate : undefined;
     const storeAllowFrom = await readProviderAllowFromStore("imessage").catch(
       () => [],
     );
@@ -212,12 +240,6 @@ export async function monitorIMessageProvider(
           return;
         }
       }
-      const groupListPolicy = resolveProviderGroupPolicy({
-        cfg,
-        provider: "imessage",
-        accountId: accountInfo.accountId,
-        groupId,
-      });
       if (groupListPolicy.allowlistEnabled && !groupListPolicy.allowed) {
         logVerbose(
           `imessage: skipping group message (${groupId ?? "unknown"}) not in allowlist`,
@@ -413,14 +435,15 @@ export async function monitorIMessageProvider(
     }
 
     if (shouldLogVerbose()) {
-      const preview = body.slice(0, 200).replace(/\n/g, "\\n");
+      const preview = truncateUtf16Safe(body, 200).replace(/\n/g, "\\n");
       logVerbose(
         `imessage inbound: chatId=${chatId ?? "unknown"} from=${ctxPayload.From} len=${body.length} preview="${preview}"`,
       );
     }
 
     const dispatcher = createReplyDispatcher({
-      responsePrefix: cfg.messages?.responsePrefix,
+      responsePrefix: resolveEffectiveMessagesConfig(cfg, route.agentId)
+        .responsePrefix,
       deliver: async (payload) => {
         await deliverReplies({
           replies: [payload],
@@ -443,6 +466,12 @@ export async function monitorIMessageProvider(
       ctx: ctxPayload,
       cfg,
       dispatcher,
+      replyOptions: {
+        disableBlockStreaming:
+          typeof accountInfo.config.blockStreaming === "boolean"
+            ? !accountInfo.config.blockStreaming
+            : undefined,
+      },
     });
     if (!queuedFinal) return;
   };

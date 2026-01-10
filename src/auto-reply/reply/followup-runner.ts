@@ -11,7 +11,7 @@ import { registerAgentRunContext } from "../../infra/agent-events.js";
 import { defaultRuntime } from "../../runtime.js";
 import { stripHeartbeatToken } from "../heartbeat.js";
 import type { OriginatingChannelType } from "../templating.js";
-import { SILENT_REPLY_TOKEN } from "../tokens.js";
+import { isSilentReplyText, SILENT_REPLY_TOKEN } from "../tokens.js";
 import type { GetReplyOptions, ReplyPayload } from "../types.js";
 import type { FollowupRun } from "./queue.js";
 import {
@@ -19,10 +19,7 @@ import {
   filterMessagingToolDuplicates,
   shouldSuppressMessagingToolReplies,
 } from "./reply-payloads.js";
-import {
-  createReplyToModeFilter,
-  resolveReplyToMode,
-} from "./reply-threading.js";
+import { resolveReplyToMode } from "./reply-threading.js";
 import { isRoutableChannel, routeReply } from "./route-reply.js";
 import { incrementCompactionCount } from "./session-updates.js";
 import type { TypingController } from "./typing.js";
@@ -83,7 +80,7 @@ export function createFollowupRunner(params: {
         continue;
       }
       if (
-        payload.text?.trim() === SILENT_REPLY_TOKEN &&
+        isSilentReplyText(payload.text, SILENT_REPLY_TOKEN) &&
         !payload.mediaUrl &&
         !payload.mediaUrls?.length
       ) {
@@ -97,6 +94,7 @@ export function createFollowupRunner(params: {
           payload,
           channel: originatingChannel,
           to: originatingTo,
+          sessionKey: queued.run.sessionKey,
           accountId: queued.originatingAccountId,
           threadId: queued.originatingThreadId,
           cfg: queued.run.config,
@@ -121,7 +119,10 @@ export function createFollowupRunner(params: {
     try {
       const runId = crypto.randomUUID();
       if (queued.run.sessionKey) {
-        registerAgentRunContext(runId, { sessionKey: queued.run.sessionKey });
+        registerAgentRunContext(runId, {
+          sessionKey: queued.run.sessionKey,
+          verboseLevel: queued.run.verboseLevel,
+        });
       }
       let autoCompactionCompleted = false;
       let runResult: Awaited<ReturnType<typeof runEmbeddedPiAgent>>;
@@ -194,13 +195,12 @@ export function createFollowupRunner(params: {
         (queued.run.messageProvider?.toLowerCase() as
           | OriginatingChannelType
           | undefined);
-      const applyReplyToMode = createReplyToModeFilter(
-        resolveReplyToMode(queued.run.config, replyToChannel),
-      );
+      const replyToMode = resolveReplyToMode(queued.run.config, replyToChannel);
 
       const replyTaggedPayloads: ReplyPayload[] = applyReplyThreading({
         payloads: sanitizedPayloads,
-        applyReplyToMode,
+        replyToMode,
+        replyToChannel,
       });
 
       const dedupedPayloads = filterMessagingToolDuplicates({

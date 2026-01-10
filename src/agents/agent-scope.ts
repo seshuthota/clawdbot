@@ -11,6 +11,8 @@ import {
 import { resolveUserPath } from "../utils.js";
 import { DEFAULT_AGENT_WORKSPACE_DIR } from "./workspace.js";
 
+export { resolveAgentIdFromSessionKey } from "../routing/session-key.js";
+
 type AgentEntry = NonNullable<
   NonNullable<ClawdbotConfig["agents"]>["list"]
 >[number];
@@ -29,13 +31,6 @@ type ResolvedAgentConfig = {
 };
 
 let defaultAgentWarned = false;
-
-export function resolveAgentIdFromSessionKey(
-  sessionKey?: string | null,
-): string {
-  const parsed = parseAgentSessionKey(sessionKey);
-  return normalizeAgentId(parsed?.agentId ?? DEFAULT_AGENT_ID);
-}
 
 function listAgents(cfg: ClawdbotConfig): AgentEntry[] {
   const list = cfg.agents?.list;
@@ -57,6 +52,26 @@ export function resolveDefaultAgentId(cfg: ClawdbotConfig): string {
   }
   const chosen = (defaults[0] ?? agents[0])?.id?.trim();
   return normalizeAgentId(chosen || DEFAULT_AGENT_ID);
+}
+
+export function resolveSessionAgentIds(params: {
+  sessionKey?: string;
+  config?: ClawdbotConfig;
+}): { defaultAgentId: string; sessionAgentId: string } {
+  const defaultAgentId = resolveDefaultAgentId(params.config ?? {});
+  const sessionKey = params.sessionKey?.trim();
+  const parsed = sessionKey ? parseAgentSessionKey(sessionKey) : null;
+  const sessionAgentId = parsed?.agentId
+    ? normalizeAgentId(parsed.agentId)
+    : defaultAgentId;
+  return { defaultAgentId, sessionAgentId };
+}
+
+export function resolveSessionAgentId(params: {
+  sessionKey?: string;
+  config?: ClawdbotConfig;
+}): string {
+  return resolveSessionAgentIds(params).sessionAgentId;
 }
 
 function resolveAgentEntry(

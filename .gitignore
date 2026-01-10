@@ -64,3 +64,4 @@ latest.json
 
 # Local untracked files
 .local/
+.vscode/

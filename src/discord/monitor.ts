@@ -17,7 +17,10 @@ import { GatewayIntents, GatewayPlugin } from "@buape/carbon/gateway";
 import type { APIAttachment } from "discord-api-types/v10";
 import { ApplicationCommandOptionType, Routes } from "discord-api-types/v10";
 
-import { resolveAckReaction } from "../agents/identity.js";
+import {
+  resolveAckReaction,
+  resolveEffectiveMessagesConfig,
+} from "../agents/identity.js";
 import { resolveTextChunkLimit } from "../auto-reply/chunk.js";
 import { hasControlCommand } from "../auto-reply/command-detection.js";
 import {
@@ -48,7 +51,7 @@ import { formatDurationSeconds } from "../infra/format-duration.js";
 import { recordProviderActivity } from "../infra/provider-activity.js";
 import { enqueueSystemEvent } from "../infra/system-events.js";
 import { getChildLogger } from "../logging.js";
-import { detectMime } from "../media/mime.js";
+import { fetchRemoteMedia } from "../media/fetch.js";
 import { saveMediaBuffer } from "../media/store.js";
 import { buildPairingReply } from "../pairing/pairing-messages.js";
 import {
@@ -61,15 +64,21 @@ import {
 } from "../routing/resolve-route.js";
 import { resolveThreadSessionKeys } from "../routing/session-key.js";
 import type { RuntimeEnv } from "../runtime.js";
+import { truncateUtf16Safe } from "../utils.js";
 import { loadWebMedia } from "../web/media.js";
 import { resolveDiscordAccount } from "./accounts.js";
 import { chunkDiscordText } from "./chunk.js";
+import { attachDiscordGatewayLogging } from "./gateway-logging.js";
 import {
   getDiscordGatewayEmitter,
   waitForDiscordGatewayStop,
 } from "./monitor.gateway.js";
 import { fetchDiscordApplicationId } from "./probe.js";
-import { reactMessageDiscord, sendMessageDiscord } from "./send.js";
+import {
+  reactMessageDiscord,
+  removeReactionDiscord,
+  sendMessageDiscord,
+} from "./send.js";
 import { normalizeDiscordToken } from "./token.js";
 
 export type MonitorDiscordOpts = {
@@ -109,7 +118,20 @@ type DiscordThreadStarter = {
   timestamp?: number;
 };
 
+type DiscordChannelInfo = {
+  type: ChannelType;
+  name?: string;
+  topic?: string;
+  parentId?: string;
+};
+
 const DISCORD_THREAD_STARTER_CACHE = new Map<string, DiscordThreadStarter>();
+const DISCORD_CHANNEL_INFO_CACHE_TTL_MS = 5 * 60 * 1000;
+const DISCORD_CHANNEL_INFO_NEGATIVE_CACHE_TTL_MS = 30 * 1000;
+const DISCORD_CHANNEL_INFO_CACHE = new Map<
+  string,
+  { value: DiscordChannelInfo | null; expiresAt: number }
+>();
 const DISCORD_SLOW_LISTENER_THRESHOLD_MS = 1000;
 const DISCORD_HEALTH_CHECK_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
 const DISCORD_STALE_THRESHOLD_MS = 10 * 60 * 1000; // 10 minutes
@@ -188,14 +210,22 @@ async function resolveDiscordThreadStarter(params: {
   channel: DiscordThreadChannel;
   client: Client;
   parentId?: string;
+  parentType?: ChannelType;
 }): Promise<DiscordThreadStarter | null> {
   const cacheKey = params.channel.id;
   const cached = DISCORD_THREAD_STARTER_CACHE.get(cacheKey);
   if (cached) return cached;
   try {
-    if (!params.parentId) return null;
+    const parentType = params.parentType;
+    const isForumParent =
+      parentType === ChannelType.GuildForum ||
+      parentType === ChannelType.GuildMedia;
+    const messageChannelId = isForumParent
+      ? params.channel.id
+      : params.parentId;
+    if (!messageChannelId) return null;
     const starter = (await params.client.rest.get(
-      Routes.channelMessage(params.parentId, params.channel.id),
+      Routes.channelMessage(messageChannelId, params.channel.id),
     )) as {
       content?: string | null;
       embeds?: Array<{ description?: string | null }>;
@@ -274,6 +304,66 @@ export type DiscordMessageHandler = (
   data: DiscordMessageEvent,
   client: Client,
 ) => Promise<void>;
+
+function isDiscordThreadType(type: ChannelType | undefined): boolean {
+  return (
+    type === ChannelType.PublicThread ||
+    type === ChannelType.PrivateThread ||
+    type === ChannelType.AnnouncementThread
+  );
+}
+
+type DiscordThreadParentInfo = {
+  id?: string;
+  name?: string;
+  type?: ChannelType;
+};
+
+function resolveDiscordThreadChannel(params: {
+  isGuildMessage: boolean;
+  message: DiscordMessageEvent["message"];
+  channelInfo: DiscordChannelInfo | null;
+}): DiscordThreadChannel | null {
+  if (!params.isGuildMessage) return null;
+  const { message, channelInfo } = params;
+  const channel =
+    "channel" in message
+      ? (message as { channel?: unknown }).channel
+      : undefined;
+  const isThreadChannel =
+    channel &&
+    typeof channel === "object" &&
+    "isThread" in channel &&
+    typeof (channel as { isThread?: unknown }).isThread === "function" &&
+    (channel as { isThread: () => boolean }).isThread();
+  if (isThreadChannel) return channel as unknown as DiscordThreadChannel;
+  if (!isDiscordThreadType(channelInfo?.type)) return null;
+  return {
+    id: message.channelId,
+    name: channelInfo?.name ?? undefined,
+    parentId: channelInfo?.parentId ?? undefined,
+    parent: undefined,
+  };
+}
+
+async function resolveDiscordThreadParentInfo(params: {
+  client: Client;
+  threadChannel: DiscordThreadChannel;
+  channelInfo: DiscordChannelInfo | null;
+}): Promise<DiscordThreadParentInfo> {
+  const { threadChannel, channelInfo, client } = params;
+  const parentId =
+    threadChannel.parentId ??
+    threadChannel.parent?.id ??
+    channelInfo?.parentId ??
+    undefined;
+  if (!parentId) return {};
+  let parentName = threadChannel.parent?.name;
+  const parentInfo = await resolveDiscordChannelInfo(client, parentId);
+  parentName = parentName ?? parentInfo?.name;
+  const parentType = parentInfo?.type;
+  return { id: parentId, name: parentName, type: parentType };
+}
 
 export function resolveDiscordReplyTarget(opts: {
   replyToMode: ReplyToMode;
@@ -473,14 +563,34 @@ export async function monitorDiscordProvider(opts: MonitorDiscordOpts = {}) {
 
   const gateway = client.getPlugin<GatewayPlugin>("gateway");
   const gatewayEmitter = getDiscordGatewayEmitter(gateway);
-  const onGatewayWarning = (warning: unknown) => {
-    logVerbose(`discord gateway warning: ${String(warning)}`);
-  };
-  if (shouldLogVerbose()) {
-    gatewayEmitter?.on("warning", onGatewayWarning);
-  }
+  const stopGatewayLogging = attachDiscordGatewayLogging({
+    emitter: gatewayEmitter,
+    runtime,
+  });
 
-  // Start health monitor - emit error on stale to trigger reconnection
+  // Timeout to detect zombie connections where HELLO is never received.
+  const HELLO_TIMEOUT_MS = 30000;
+  let helloTimeoutId: ReturnType<typeof setTimeout> | undefined;
+  const onGatewayDebug = (msg: unknown) => {
+    const message = String(msg);
+    if (!message.includes("WebSocket connection opened")) return;
+    if (helloTimeoutId) clearTimeout(helloTimeoutId);
+    helloTimeoutId = setTimeout(() => {
+      if (!gateway?.isConnected) {
+        runtime.log?.(
+          danger(
+            `[discord] connection stalled: no HELLO received within ${HELLO_TIMEOUT_MS}ms, forcing reconnect`,
+          ),
+        );
+        gateway?.disconnect();
+        gateway?.connect(false);
+      }
+      helloTimeoutId = undefined;
+    }, HELLO_TIMEOUT_MS);
+  };
+  gatewayEmitter?.on("debug", onGatewayDebug);
+
+  // Start health monitor - emit error on stale to trigger reconnection (LOCAL CHANGE)
   healthMonitor.start(() => {
     const staleError = new Error("Discord gateway stale - no events received");
     gatewayEmitter?.emit("error", staleError);
@@ -509,7 +619,9 @@ export async function monitorDiscordProvider(opts: MonitorDiscordOpts = {}) {
     });
   } finally {
     healthMonitor.stop();
-    gatewayEmitter?.removeListener("warning", onGatewayWarning);
+    stopGatewayLogging();
+    if (helloTimeoutId) clearTimeout(helloTimeoutId);
+    gatewayEmitter?.removeListener("debug", onGatewayDebug);
   }
 }
 
@@ -725,17 +837,24 @@ export function createDiscordMessageHandler(params: {
           "name" in message.channel
           ? message.channel.name
           : undefined);
-      const isThreadChannel =
-        isGuildMessage &&
-        message.channel &&
-        "isThread" in message.channel &&
-        message.channel.isThread();
-      const threadChannel = isThreadChannel
-        ? (message.channel as DiscordThreadChannel)
-        : null;
-      const threadParentId =
-        threadChannel?.parentId ?? threadChannel?.parent?.id ?? undefined;
-      const threadParentName = threadChannel?.parent?.name;
+      const threadChannel = resolveDiscordThreadChannel({
+        isGuildMessage,
+        message,
+        channelInfo,
+      });
+      let threadParentId: string | undefined;
+      let threadParentName: string | undefined;
+      let threadParentType: ChannelType | undefined;
+      if (threadChannel) {
+        const parentInfo = await resolveDiscordThreadParentInfo({
+          client,
+          threadChannel,
+          channelInfo,
+        });
+        threadParentId = parentInfo.id;
+        threadParentName = parentInfo.name;
+        threadParentType = parentInfo.type;
+      }
       const threadName = threadChannel?.name;
       const configChannelName = threadParentName ?? channelName;
       const configChannelSlug = configChannelName
@@ -911,6 +1030,7 @@ export function createDiscordMessageHandler(params: {
         return;
       }
       const ackReaction = resolveAckReaction(cfg, route.agentId);
+      const removeAckAfterReply = cfg.messages?.removeAckAfterReply ?? false;
       const shouldAckReaction = () => {
         if (!ackReaction) return false;
         if (ackReactionScope === "all") return true;
@@ -925,15 +1045,19 @@ export function createDiscordMessageHandler(params: {
         }
         return false;
       };
-      if (shouldAckReaction()) {
-        reactMessageDiscord(message.channelId, message.id, ackReaction, {
+      const ackReactionPromise = shouldAckReaction()
+        ? reactMessageDiscord(message.channelId, message.id, ackReaction, {
           rest: client.rest,
-        }).catch((err) => {
-          logVerbose(
-            `discord react failed for channel ${message.channelId}: ${String(err)}`,
-          );
-        });
-      }
+        }).then(
+          () => true,
+          (err) => {
+            logVerbose(
+              `discord react failed for channel ${message.channelId}: ${String(err)}`,
+            );
+            return false;
+          },
+        )
+        : null;
 
       const fromLabel = isDirectMessage
         ? buildDirectLabel(author)
@@ -999,6 +1123,7 @@ export function createDiscordMessageHandler(params: {
           channel: threadChannel,
           client,
           parentId: threadParentId,
+          parentType: threadParentType,
         });
         if (starter?.text) {
           const starterEnvelope = formatThreadStarterEnvelope({
@@ -1085,7 +1210,10 @@ export function createDiscordMessageHandler(params: {
       }
 
       if (shouldLogVerbose()) {
-        const preview = combinedBody.slice(0, 200).replace(/\n/g, "\\n");
+        const preview = truncateUtf16Safe(combinedBody, 200).replace(
+          /\n/g,
+          "\\n",
+        );
         logVerbose(
           `discord inbound: channel=${message.channelId} from=${ctxPayload.From} preview="${preview}"`,
         );
@@ -1094,7 +1222,8 @@ export function createDiscordMessageHandler(params: {
       let didSendReply = false;
       const { dispatcher, replyOptions, markDispatchIdle } =
         createReplyDispatcherWithTyping({
-          responsePrefix: cfg.messages?.responsePrefix,
+          responsePrefix: resolveEffectiveMessagesConfig(cfg, route.agentId)
+            .responsePrefix,
           deliver: async (payload) => {
             await deliverDiscordReply({
               replies: [payload],
@@ -1121,7 +1250,14 @@ export function createDiscordMessageHandler(params: {
         ctx: ctxPayload,
         cfg,
         dispatcher,
-        replyOptions: { ...replyOptions, skillFilter: channelConfig?.skills },
+        replyOptions: {
+          ...replyOptions,
+          skillFilter: channelConfig?.skills,
+          disableBlockStreaming:
+            typeof discordConfig?.blockStreaming === "boolean"
+              ? !discordConfig.blockStreaming
+              : undefined,
+        },
       });
       markDispatchIdle();
       if (!queuedFinal) {
@@ -1141,6 +1277,24 @@ export function createDiscordMessageHandler(params: {
         logVerbose(
           `discord: delivered ${finalCount} reply${finalCount === 1 ? "" : "ies"} to ${replyTarget}`,
         );
+      }
+      if (removeAckAfterReply && ackReactionPromise && ackReaction) {
+        const ackReactionValue = ackReaction;
+        void ackReactionPromise.then((didAck) => {
+          if (!didAck) return;
+          removeReactionDiscord(
+            message.channelId,
+            message.id,
+            ackReactionValue,
+            {
+              rest: client.rest,
+            },
+          ).catch((err) => {
+            logVerbose(
+              `discord: failed to remove ack reaction from ${message.channelId}/${message.id}: ${String(err)}`,
+            );
+          });
+        });
       }
       if (
         isGuildMessage &&
@@ -1580,7 +1734,8 @@ function createDiscordNativeCommand(params: {
 
       let didReply = false;
       const dispatcher = createReplyDispatcher({
-        responsePrefix: cfg.messages?.responsePrefix,
+        responsePrefix: resolveEffectiveMessagesConfig(cfg, route.agentId)
+          .responsePrefix,
         deliver: async (payload, _info) => {
           await deliverDiscordInteractionReply({
             interaction,
@@ -1749,15 +1904,42 @@ async function deliverDiscordReply(params: {
 async function resolveDiscordChannelInfo(
   client: Client,
   channelId: string,
-): Promise<{ type: ChannelType; name?: string; topic?: string } | null> {
+): Promise<DiscordChannelInfo | null> {
+  const cached = DISCORD_CHANNEL_INFO_CACHE.get(channelId);
+  if (cached) {
+    if (cached.expiresAt > Date.now()) return cached.value;
+    DISCORD_CHANNEL_INFO_CACHE.delete(channelId);
+  }
   try {
     const channel = await client.fetchChannel(channelId);
-    if (!channel) return null;
+    if (!channel) {
+      DISCORD_CHANNEL_INFO_CACHE.set(channelId, {
+        value: null,
+        expiresAt: Date.now() + DISCORD_CHANNEL_INFO_NEGATIVE_CACHE_TTL_MS,
+      });
+      return null;
+    }
     const name = "name" in channel ? (channel.name ?? undefined) : undefined;
     const topic = "topic" in channel ? (channel.topic ?? undefined) : undefined;
-    return { type: channel.type, name, topic };
+    const parentId =
+      "parentId" in channel ? (channel.parentId ?? undefined) : undefined;
+    const payload: DiscordChannelInfo = {
+      type: channel.type,
+      name,
+      topic,
+      parentId,
+    };
+    DISCORD_CHANNEL_INFO_CACHE.set(channelId, {
+      value: payload,
+      expiresAt: Date.now() + DISCORD_CHANNEL_INFO_CACHE_TTL_MS,
+    });
+    return payload;
   } catch (err) {
     logVerbose(`discord: failed to fetch channel ${channelId}: ${String(err)}`);
+    DISCORD_CHANNEL_INFO_CACHE.set(channelId, {
+      value: null,
+      expiresAt: Date.now() + DISCORD_CHANNEL_INFO_NEGATIVE_CACHE_TTL_MS,
+    });
     return null;
   }
 }
@@ -1771,19 +1953,16 @@ async function resolveMediaList(
   const out: DiscordMediaInfo[] = [];
   for (const attachment of attachments) {
     try {
-      const res = await fetch(attachment.url);
-      if (!res.ok) {
-        throw new Error(
-          `Failed to download discord attachment: HTTP ${res.status}`,
-        );
-      }
-      const buffer = Buffer.from(await res.arrayBuffer());
-      const mime = await detectMime({
-        buffer,
-        headerMime: attachment.content_type ?? res.headers.get("content-type"),
-        filePath: attachment.filename ?? attachment.url,
+      const fetched = await fetchRemoteMedia({
+        url: attachment.url,
+        filePathHint: attachment.filename ?? attachment.url,
       });
-      const saved = await saveMediaBuffer(buffer, mime, "inbound", maxBytes);
+      const saved = await saveMediaBuffer(
+        fetched.buffer,
+        fetched.contentType ?? attachment.content_type,
+        "inbound",
+        maxBytes,
+      );
       out.push({
         path: saved.path,
         contentType: saved.contentType,

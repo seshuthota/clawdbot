@@ -1,41 +1,13 @@
 import fs from "node:fs/promises";
-import os from "node:os";
+import { tmpdir } from "node:os";
 import path from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { withTempHome as withTempHomeBase } from "../../test/helpers/temp-home.js";
+
 async function withTempHome<T>(fn: (home: string) => Promise<T>): Promise<T> {
-  const base = await fs.mkdtemp(path.join(os.tmpdir(), "clawdbot-config-"));
-  const previousHome = process.env.HOME;
-  const previousUserProfile = process.env.USERPROFILE;
-  const previousHomeDrive = process.env.HOMEDRIVE;
-  const previousHomePath = process.env.HOMEPATH;
-  process.env.HOME = base;
-  process.env.USERPROFILE = base;
-  if (process.platform === "win32") {
-    const parsed = path.parse(base);
-    process.env.HOMEDRIVE = parsed.root.replace(/\\$/, "");
-    process.env.HOMEPATH = base.slice(Math.max(parsed.root.length - 1, 0));
-  }
-  try {
-    return await fn(base);
-  } finally {
-    process.env.HOME = previousHome;
-    process.env.USERPROFILE = previousUserProfile;
-    if (process.platform === "win32") {
-      if (previousHomeDrive === undefined) {
-        delete process.env.HOMEDRIVE;
-      } else {
-        process.env.HOMEDRIVE = previousHomeDrive;
-      }
-      if (previousHomePath === undefined) {
-        delete process.env.HOMEPATH;
-      } else {
-        process.env.HOMEPATH = previousHomePath;
-      }
-    }
-    await fs.rm(base, { recursive: true, force: true });
-  }
+  return withTempHomeBase(fn, { prefix: "clawdbot-config-" });
 }
 
 /**
@@ -836,6 +808,41 @@ describe("talk.voiceAliases", () => {
   });
 });
 
+describe("broadcast", () => {
+  it("accepts a broadcast peer map with strategy", async () => {
+    vi.resetModules();
+    const { validateConfigObject } = await import("./config.js");
+    const res = validateConfigObject({
+      agents: {
+        list: [{ id: "alfred" }, { id: "baerbel" }],
+      },
+      broadcast: {
+        strategy: "parallel",
+        "120363403215116621@g.us": ["alfred", "baerbel"],
+      },
+    });
+    expect(res.ok).toBe(true);
+  });
+
+  it("rejects invalid broadcast strategy", async () => {
+    vi.resetModules();
+    const { validateConfigObject } = await import("./config.js");
+    const res = validateConfigObject({
+      broadcast: { strategy: "nope" },
+    });
+    expect(res.ok).toBe(false);
+  });
+
+  it("rejects non-array broadcast entries", async () => {
+    vi.resetModules();
+    const { validateConfigObject } = await import("./config.js");
+    const res = validateConfigObject({
+      broadcast: { "120363403215116621@g.us": 123 },
+    });
+    expect(res.ok).toBe(false);
+  });
+});
+
 describe("legacy config detection", () => {
   it("rejects routing.allowFrom", async () => {
     vi.resetModules();
@@ -984,6 +991,39 @@ describe("legacy config detection", () => {
       deny: ["sandbox"],
     });
     expect((res.config as { agent?: unknown }).agent).toBeUndefined();
+  });
+
+  it("accepts per-agent tools.elevated overrides", async () => {
+    vi.resetModules();
+    const { validateConfigObject } = await import("./config.js");
+    const res = validateConfigObject({
+      tools: {
+        elevated: {
+          allowFrom: { whatsapp: ["+15555550123"] },
+        },
+      },
+      agents: {
+        list: [
+          {
+            id: "work",
+            workspace: "~/clawd-work",
+            tools: {
+              elevated: {
+                enabled: false,
+                allowFrom: { whatsapp: ["+15555550123"] },
+              },
+            },
+          },
+        ],
+      },
+    });
+    expect(res.ok).toBe(true);
+    if (res.ok) {
+      expect(res.config?.agents?.list?.[0]?.tools?.elevated).toEqual({
+        enabled: false,
+        allowFrom: { whatsapp: ["+15555550123"] },
+      });
+    }
   });
 
   it("rejects telegram.requireMention", async () => {
@@ -1277,7 +1317,7 @@ describe("multi-agent agentDir validation", () => {
   it("rejects shared agents.list agentDir", async () => {
     vi.resetModules();
     const { validateConfigObject } = await import("./config.js");
-    const shared = path.join(os.tmpdir(), "clawdbot-shared-agentdir");
+    const shared = path.join(tmpdir(), "clawdbot-shared-agentdir");
     const res = validateConfigObject({
       agents: {
         list: [

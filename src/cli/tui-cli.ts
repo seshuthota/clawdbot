@@ -1,6 +1,7 @@
 import type { Command } from "commander";
 import { defaultRuntime } from "../runtime.js";
 import { runTui } from "../tui/tui.js";
+import { parseTimeoutMs } from "./parse-timeout.js";
 
 export function registerTuiCli(program: Command) {
   program
@@ -18,14 +19,20 @@ export function registerTuiCli(program: Command) {
     )
     .option("--deliver", "Deliver assistant replies", false)
     .option("--thinking <level>", "Thinking level override")
-    .option("--timeout-ms <ms>", "Agent timeout in ms", "30000")
+    .option("--message <text>", "Send an initial message after connecting")
+    .option(
+      "--timeout-ms <ms>",
+      "Agent timeout in ms (defaults to agents.defaults.timeoutSeconds)",
+    )
     .option("--history-limit <n>", "History entries to load", "200")
     .action(async (opts) => {
       try {
-        const timeoutMs = Number.parseInt(
-          String(opts.timeoutMs ?? "30000"),
-          10,
-        );
+        const timeoutMs = parseTimeoutMs(opts.timeoutMs);
+        if (opts.timeoutMs !== undefined && timeoutMs === undefined) {
+          defaultRuntime.error(
+            `warning: invalid --timeout-ms "${String(opts.timeoutMs)}"; ignoring`,
+          );
+        }
         const historyLimit = Number.parseInt(
           String(opts.historyLimit ?? "200"),
           10,
@@ -37,7 +44,8 @@ export function registerTuiCli(program: Command) {
           session: opts.session as string | undefined,
           deliver: Boolean(opts.deliver),
           thinking: opts.thinking as string | undefined,
-          timeoutMs: Number.isNaN(timeoutMs) ? undefined : timeoutMs,
+          message: opts.message as string | undefined,
+          timeoutMs,
           historyLimit: Number.isNaN(historyLimit) ? undefined : historyLimit,
         });
       } catch (err) {

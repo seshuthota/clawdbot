@@ -5,7 +5,11 @@ import {
   agentsDeleteCommand,
   agentsListCommand,
 } from "../commands/agents.js";
-import { configureCommand } from "../commands/configure.js";
+import {
+  CONFIGURE_WIZARD_SECTIONS,
+  configureCommand,
+  configureCommandWithSections,
+} from "../commands/configure.js";
 import { doctorCommand } from "../commands/doctor.js";
 import { healthCommand } from "../commands/health.js";
 import { messageCommand } from "../commands/message.js";
@@ -237,15 +241,33 @@ export function buildProgram() {
     )
     .option("--workspace <dir>", "Agent workspace directory (default: ~/clawd)")
     .option("--non-interactive", "Run without prompts", false)
+    .option("--flow <flow>", "Wizard flow: quickstart|advanced")
     .option("--mode <mode>", "Wizard mode: local|remote")
     .option(
       "--auth-choice <choice>",
-      "Auth: oauth|claude-cli|token|openai-codex|openai-api-key|codex-cli|antigravity|gemini-api-key|apiKey|minimax-cloud|minimax|skip",
+      "Auth: setup-token|claude-cli|token|openai-codex|openai-api-key|codex-cli|antigravity|gemini-api-key|apiKey|minimax-cloud|minimax-api|minimax|opencode-zen|skip",
+    )
+    .option(
+      "--token-provider <id>",
+      "Token provider id (non-interactive; used with --auth-choice token)",
+    )
+    .option(
+      "--token <token>",
+      "Token value (non-interactive; used with --auth-choice token)",
+    )
+    .option(
+      "--token-profile-id <id>",
+      "Auth profile id (non-interactive; default: <provider>:manual)",
+    )
+    .option(
+      "--token-expires-in <duration>",
+      "Optional token expiry duration (e.g. 365d, 12h)",
     )
     .option("--anthropic-api-key <key>", "Anthropic API key")
     .option("--openai-api-key <key>", "OpenAI API key")
     .option("--gemini-api-key <key>", "Gemini API key")
     .option("--minimax-api-key <key>", "MiniMax API key")
+    .option("--opencode-zen-api-key <key>", "OpenCode Zen API key")
     .option("--gateway-port <port>", "Gateway port")
     .option("--gateway-bind <mode>", "Gateway bind: loopback|lan|tailnet|auto")
     .option("--gateway-auth <mode>", "Gateway auth: off|token|password")
@@ -256,20 +278,34 @@ export function buildProgram() {
     .option("--tailscale <mode>", "Tailscale: off|serve|funnel")
     .option("--tailscale-reset-on-exit", "Reset tailscale serve/funnel on exit")
     .option("--install-daemon", "Install gateway daemon")
+    .option("--no-install-daemon", "Skip gateway daemon install")
+    .option("--skip-daemon", "Skip gateway daemon install")
     .option("--daemon-runtime <runtime>", "Daemon runtime: node|bun")
+    .option("--skip-providers", "Skip provider setup")
     .option("--skip-skills", "Skip skills setup")
     .option("--skip-health", "Skip health check")
+    .option("--skip-ui", "Skip Control UI/TUI prompts")
     .option("--node-manager <name>", "Node manager for skills: npm|pnpm|bun")
     .option("--json", "Output JSON summary", false)
-    .action(async (opts) => {
+    .action(async (opts, command) => {
       try {
+        const installDaemon =
+          typeof command?.getOptionValueSource === "function"
+            ? command.getOptionValueSource("skipDaemon") === "cli"
+              ? false
+              : command.getOptionValueSource("installDaemon") === "cli"
+                ? Boolean(opts.installDaemon)
+                : undefined
+            : undefined;
         await onboardCommand(
           {
             workspace: opts.workspace as string | undefined,
             nonInteractive: Boolean(opts.nonInteractive),
+            flow: opts.flow as "quickstart" | "advanced" | undefined,
             mode: opts.mode as "local" | "remote" | undefined,
             authChoice: opts.authChoice as
               | "oauth"
+              | "setup-token"
               | "claude-cli"
               | "token"
               | "openai-codex"
@@ -279,13 +315,20 @@ export function buildProgram() {
               | "gemini-api-key"
               | "apiKey"
               | "minimax-cloud"
+              | "minimax-api"
               | "minimax"
+              | "opencode-zen"
               | "skip"
               | undefined,
+            tokenProvider: opts.tokenProvider as string | undefined,
+            token: opts.token as string | undefined,
+            tokenProfileId: opts.tokenProfileId as string | undefined,
+            tokenExpiresIn: opts.tokenExpiresIn as string | undefined,
             anthropicApiKey: opts.anthropicApiKey as string | undefined,
             openaiApiKey: opts.openaiApiKey as string | undefined,
             geminiApiKey: opts.geminiApiKey as string | undefined,
             minimaxApiKey: opts.minimaxApiKey as string | undefined,
+            opencodeZenApiKey: opts.opencodeZenApiKey as string | undefined,
             gatewayPort:
               typeof opts.gatewayPort === "string"
                 ? Number.parseInt(opts.gatewayPort, 10)
@@ -307,10 +350,12 @@ export function buildProgram() {
             remoteToken: opts.remoteToken as string | undefined,
             tailscale: opts.tailscale as "off" | "serve" | "funnel" | undefined,
             tailscaleResetOnExit: Boolean(opts.tailscaleResetOnExit),
-            installDaemon: Boolean(opts.installDaemon),
+            installDaemon,
             daemonRuntime: opts.daemonRuntime as "node" | "bun" | undefined,
+            skipProviders: Boolean(opts.skipProviders),
             skipSkills: Boolean(opts.skipSkills),
             skipHealth: Boolean(opts.skipHealth),
+            skipUi: Boolean(opts.skipUi),
             nodeManager: opts.nodeManager as "npm" | "pnpm" | "bun" | undefined,
             json: Boolean(opts.json),
           },
@@ -328,9 +373,38 @@ export function buildProgram() {
     .description(
       "Interactive wizard to update models, providers, skills, and gateway",
     )
-    .action(async () => {
+    .option(
+      "--section <name>",
+      `Configure only one section (repeatable). One of: ${CONFIGURE_WIZARD_SECTIONS.join(", ")}`,
+      (value, previous: string[]) => [...previous, value],
+      [] as string[],
+    )
+    .action(async (opts) => {
       try {
-        await configureCommand(defaultRuntime);
+        const sections: string[] = Array.isArray(opts.section)
+          ? opts.section
+              .map((value: unknown) =>
+                typeof value === "string" ? value.trim() : "",
+              )
+              .filter(Boolean)
+          : [];
+        if (sections.length === 0) {
+          await configureCommand(defaultRuntime);
+          return;
+        }
+
+        const invalid = sections.filter(
+          (s) => !CONFIGURE_WIZARD_SECTIONS.includes(s as never),
+        );
+        if (invalid.length > 0) {
+          defaultRuntime.error(
+            `Invalid --section: ${invalid.join(", ")}. Expected one of: ${CONFIGURE_WIZARD_SECTIONS.join(", ")}.`,
+          );
+          defaultRuntime.exit(1);
+          return;
+        }
+
+        await configureCommandWithSections(sections as never, defaultRuntime);
       } catch (err) {
         defaultRuntime.error(String(err));
         defaultRuntime.exit(1);
@@ -487,6 +561,10 @@ Examples:
       .option(
         "--media <path-or-url>",
         "Attach media (image/audio/video/document). Accepts local paths or URLs.",
+      )
+      .option(
+        "--buttons-json <json>",
+        "Telegram inline keyboard buttons as JSON (array of button rows)",
       )
       .option("--reply-to <id>", "Reply-to message id")
       .option("--thread-id <id>", "Thread id (Telegram forum thread)")

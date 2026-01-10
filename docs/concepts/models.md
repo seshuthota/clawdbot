@@ -33,6 +33,9 @@ Related:
 Model refs are normalized to lowercase. Provider aliases like `z.ai/*` normalize
 to `zai/*`.
 
+Provider configuration examples (including OpenCode Zen) live in
+[/gateway/configuration](/gateway/configuration#opencode-zen-multi-model-proxy).
+
 ## “Model is not allowed” (and why replies stop)
 
 If `agents.defaults.models` is set, it becomes the **allowlist** for `/model` and for
@@ -110,6 +113,13 @@ provider has no credentials, `models status` prints a **Missing auth** section.
 JSON includes `auth.oauth` (warn window + profiles) and `auth.providers`
 (effective auth per provider).
 Use `--check` for automation (exit `1` when missing/expired, `2` when expiring).
+
+Preferred Anthropic auth is the Claude CLI setup-token (run on the gateway host):
+
+```bash
+claude setup-token
+clawdbot models status
+```
 
 ## Scanning (OpenRouter free models)
 

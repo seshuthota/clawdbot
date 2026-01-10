@@ -1,5 +1,7 @@
 import crypto from "node:crypto";
 
+import { truncateUtf16Safe } from "../utils.js";
+import { migrateLegacyCronPayload } from "./payload-migration.js";
 import { computeNextRunAtMs } from "./schedule.js";
 import { loadCronStore, saveCronStore } from "./store.js";
 import type {
@@ -61,7 +63,7 @@ function normalizeOptionalText(raw: unknown) {
 
 function truncateText(input: string, maxLen: number) {
   if (input.length <= maxLen) return input;
-  return `${input.slice(0, Math.max(0, maxLen - 1)).trimEnd()}…`;
+  return `${truncateUtf16Safe(input, Math.max(0, maxLen - 1)).trimEnd()}…`;
 }
 
 function inferLegacyName(job: {
@@ -315,6 +317,13 @@ export class CronService {
       if (raw.description !== desc) {
         raw.description = desc;
         mutated = true;
+      }
+
+      const payload = raw.payload;
+      if (payload && typeof payload === "object" && !Array.isArray(payload)) {
+        if (migrateLegacyCronPayload(payload as Record<string, unknown>)) {
+          mutated = true;
+        }
       }
     }
     this.store = { version: 1, jobs: jobs as unknown as CronJob[] };
