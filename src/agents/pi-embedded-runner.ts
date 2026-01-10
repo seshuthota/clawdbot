@@ -323,7 +323,7 @@ function hasGoogleTurnOrderingMarker(sessionManager: SessionManager): boolean {
         (entry) =>
           (entry as CustomEntryLike)?.type === "custom" &&
           (entry as CustomEntryLike)?.customType ===
-            GOOGLE_TURN_ORDERING_CUSTOM_TYPE,
+          GOOGLE_TURN_ORDERING_CUSTOM_TYPE,
       );
   } catch {
     return false;
@@ -870,10 +870,10 @@ export async function compactEmbeddedPiSession(params: {
         );
         const runtimeCapabilities = runtimeProvider
           ? (resolveProviderCapabilities({
-              cfg: params.config,
-              provider: runtimeProvider,
-              accountId: params.agentAccountId,
-            }) ?? [])
+            cfg: params.config,
+            provider: runtimeProvider,
+            accountId: params.agentAccountId,
+          }) ?? [])
           : undefined;
         const runtimeInfo = {
           host: machineName,
@@ -904,8 +904,8 @@ export async function compactEmbeddedPiSession(params: {
           reasoningTagHint,
           heartbeatPrompt: isDefaultAgent
             ? resolveHeartbeatPrompt(
-                params.config?.agents?.defaults?.heartbeat?.prompt,
-              )
+              params.config?.agents?.defaults?.heartbeat?.prompt,
+            )
             : undefined,
           skillsPrompt,
           runtimeInfo,
@@ -1221,9 +1221,9 @@ export async function runEmbeddedPiAgent(params: {
               snapshot: params.skillsSnapshot,
             })
             : applySkillEnvOverrides({
-                skills: skillEntries ?? [],
-                config: params.config,
-              });
+              skills: skillEntries ?? [],
+              config: params.config,
+            });
           const skillsPrompt = resolveSkillsPromptForRun({
             skillsSnapshot: params.skillsSnapshot,
             entries: shouldLoadSkillEntries ? skillEntries : undefined,
@@ -1285,8 +1285,8 @@ export async function runEmbeddedPiAgent(params: {
             reasoningTagHint,
             heartbeatPrompt: isDefaultAgent
               ? resolveHeartbeatPrompt(
-                  params.config?.agents?.defaults?.heartbeat?.prompt,
-                )
+                params.config?.agents?.defaults?.heartbeat?.prompt,
+              )
               : undefined,
             skillsPrompt,
             runtimeInfo,
@@ -1349,6 +1349,7 @@ export async function runEmbeddedPiAgent(params: {
               modelApi: model.api,
               sessionManager,
               sessionId: params.sessionId,
+            });
             const validated = validateGeminiTurns(prior);
             if (validated.length > 0) {
               session.agent.replaceMessages(validated);
@@ -1381,6 +1382,7 @@ export async function runEmbeddedPiAgent(params: {
               onPartialReply: params.onPartialReply,
               onAgentEvent: params.onAgentEvent,
               enforceFinalTag: params.enforceFinalTag,
+            });
           } catch (err) {
             session.dispose();
             throw err;
@@ -1525,6 +1527,7 @@ export async function runEmbeddedPiAgent(params: {
             const fallbackThinking = pickFallbackThinkingLevel({
               message: errorText,
               attempted: attemptedThinking,
+            });
             if (fallbackThinking) {
               log.warn(
                 `unsupported thinking level for ${provider}/${modelId}; retrying with ${fallbackThinking}`,
@@ -1713,54 +1716,57 @@ export async function runEmbeddedPiAgent(params: {
               replyToId,
               replyToTag,
               replyToCurrent,
-          }
+            });
 
-          // Check if any replyItem has audioAsVoice tag - if so, apply to all media payloads
-          const hasAudioAsVoiceTag = replyItems.some(
-            (item) => item.audioAsVoice,
-          );
-          const payloads = replyItems
-            .map((item) => ({
-              text: item.text?.trim() ? item.text.trim() : undefined,
-              mediaUrls: item.media?.length ? item.media : undefined,
-              mediaUrl: item.media?.[0],
-              isError: item.isError,
-              replyToId: item.replyToId,
-              replyToTag: item.replyToTag,
-              replyToCurrent: item.replyToCurrent,
-              // Apply audioAsVoice to media payloads if tag was found anywhere in response
-              audioAsVoice:
-                item.audioAsVoice || (hasAudioAsVoiceTag && item.media?.length),
-            }))
-            .filter(
-              (p) =>
-                p.text || p.mediaUrl || (p.mediaUrls && p.mediaUrls.length > 0),
+            // Check if any replyItem has audioAsVoice tag - if so, apply to all media payloads
+            const hasAudioAsVoiceTag = replyItems.some(
+              (item) => item.audioAsVoice,
             );
+            const payloads = replyItems
+              .map((item) => ({
+                text: item.text?.trim() ? item.text.trim() : undefined,
+                mediaUrls: item.media?.length ? item.media : undefined,
+                mediaUrl: item.media?.[0],
+                isError: item.isError,
+                replyToId: item.replyToId,
+                replyToTag: item.replyToTag,
+                replyToCurrent: item.replyToCurrent,
+                // Apply audioAsVoice to media payloads if tag was found anywhere in response
+                audioAsVoice:
+                  item.audioAsVoice || (hasAudioAsVoiceTag && item.media?.length),
+              }))
+              .filter(
+                (p) =>
+                  p.text || p.mediaUrl || (p.mediaUrls && p.mediaUrls.length > 0),
+              );
 
-          log.debug(
-            `embedded run done: runId=${params.runId} sessionId=${params.sessionId} durationMs=${Date.now() - started} aborted=${aborted}`,
-          );
-          if (lastProfileId) {
-            await markAuthProfileGood({
-              store: authStore,
-              provider,
-              profileId: lastProfileId,
-            // Track usage for round-robin rotation
-            await markAuthProfileUsed({
-              store: authStore,
-              profileId: lastProfileId,
+            log.debug(
+              `embedded run done: runId=${params.runId} sessionId=${params.sessionId} durationMs=${Date.now() - started} aborted=${aborted}`,
+            );
+            if (lastProfileId) {
+              await markAuthProfileGood({
+                store: authStore,
+                provider,
+                profileId: lastProfileId,
+              });
+              // Track usage for round-robin rotation
+              await markAuthProfileUsed({
+                store: authStore,
+                profileId: lastProfileId,
+              });
+            }
+            return {
+              payloads: payloads.length ? payloads : undefined,
+              meta: {
+                durationMs: Date.now() - started,
+                agentMeta,
+                aborted,
+              },
+              didSendViaMessagingTool: didSendViaMessagingTool(),
+              messagingToolSentTexts: getMessagingToolSentTexts(),
+              messagingToolSentTargets: getMessagingToolSentTargets(),
+            };
           }
-          return {
-            payloads: payloads.length ? payloads : undefined,
-            meta: {
-              durationMs: Date.now() - started,
-              agentMeta,
-              aborted,
-            },
-            didSendViaMessagingTool: didSendViaMessagingTool(),
-            messagingToolSentTexts: getMessagingToolSentTexts(),
-            messagingToolSentTargets: getMessagingToolSentTargets(),
-          };
         } finally {
           restoreSkillEnv?.();
           process.chdir(prevCwd);
