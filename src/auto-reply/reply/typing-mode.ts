@@ -8,7 +8,7 @@ export type TypingModeContext = {
   isHeartbeat: boolean;
 };
 
-export const DEFAULT_GROUP_TYPING_MODE: TypingMode = "message";
+export const DEFAULT_GROUP_TYPING_MODE: TypingMode = "instant";
 
 export function resolveTypingMode({
   configured,
